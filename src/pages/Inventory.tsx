@@ -1,5 +1,6 @@
 ﻿import React, { useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "../lib/supabase";
+import QRCode from "react-qr-code";
 
 type Option = { id: string; name: string };
 
@@ -87,6 +88,89 @@ function useMediaQuery(query: string) {
   }, [query]);
 
   return matches;
+}
+
+/** --------------------- QR helpers --------------------- */
+
+function escapeHtml(s: string) {
+  return s.replace(/[&<>"']/g, (c) => {
+    switch (c) {
+      case "&":
+        return "&amp;";
+      case "<":
+        return "&lt;";
+      case ">":
+        return "&gt;";
+      case '"':
+        return "&quot;";
+      case "'":
+        return "&#039;";
+      default:
+        return c;
+    }
+  });
+}
+
+function getComponentDeepLink(componentId: string) {
+  return `${window.location.origin}/?component=${encodeURIComponent(componentId)}`;
+}
+
+function printComponentQr(opts: { id: string; name: string }) {
+  const link = getComponentDeepLink(opts.id);
+
+  const w = window.open("", "_blank", "noopener,noreferrer,width=520,height=720");
+  if (!w) return;
+
+  w.document.write(`
+    <html>
+      <head>
+        <title>Print QR</title>
+        <meta charset="utf-8" />
+        <style>
+          body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; padding: 28px; }
+          .card { border: 1px solid #ddd; border-radius: 16px; padding: 20px; text-align: center; }
+          h1 { margin: 0 0 8px; font-size: 18px; }
+          .sub { font-size: 12px; opacity: .7; margin-bottom: 16px; }
+          .link { margin-top: 14px; font-size: 10px; opacity: .75; word-break: break-all; }
+          .hint { margin-top: 14px; font-size: 12px; opacity: .75; }
+        </style>
+      </head>
+      <body>
+        <div class="card">
+          <h1>${escapeHtml(opts.name)}</h1>
+          <div class="sub">Obsidian Ops Inventory</div>
+          <div id="qr-mount"></div>
+          <div class="hint">Scan to open this item</div>
+          <div class="link">${escapeHtml(link)}</div>
+        </div>
+        <script>
+          window.onload = () => window.print();
+        </script>
+      </body>
+    </html>
+  `);
+
+  w.document.close();
+
+  // Clone the QR SVG from the current page into the print window
+  setTimeout(() => {
+    const mount = w.document.getElementById("qr-mount");
+    if (!mount) return;
+
+    const svg = document.getElementById("component-qr-svg") as SVGElement | null;
+    if (!svg) {
+      mount.innerHTML = "<div style='opacity:.7'>QR not available</div>";
+      return;
+    }
+
+    const cloned = svg.cloneNode(true) as SVGElement;
+    cloned.removeAttribute("id");
+    cloned.setAttribute("width", "240");
+    cloned.setAttribute("height", "240");
+
+    mount.innerHTML = "";
+    mount.appendChild(cloned);
+  }, 150);
 }
 
 /** --------------------- Small UI primitives --------------------- */
@@ -434,7 +518,6 @@ export default function Inventory() {
     draftIdRef.current =
       typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : String(Date.now());
 
-    // revoke old preview urls
     pendingPhotos.forEach((p) => {
       try {
         URL.revokeObjectURL(p.previewUrl);
@@ -479,6 +562,22 @@ export default function Inventory() {
     if (isMobile) setMobileTab("editor");
   }
 
+  // ✅ Auto-open component when arriving via QR deep link (?component=<id>)
+  useEffect(() => {
+    if (!rows.length) return;
+
+    const url = new URL(window.location.href);
+    const cid = url.searchParams.get("component");
+    if (!cid) return;
+
+    const match = rows.find((r) => r.id === cid);
+    if (match) {
+      startEdit(match);
+      if (isMobile) setMobileTab("editor");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rows]);
+
   // Robust move: try .move, otherwise copy+remove
   async function moveObject(bucket: string, from: string, to: string) {
     // @ts-ignore - depending on supabase-js version
@@ -515,7 +614,6 @@ export default function Inventory() {
       if (ins.error) throw ins.error;
     }
 
-    // clear pending (and revoke previews)
     pendingPhotos.forEach((p) => {
       try {
         URL.revokeObjectURL(p.previewUrl);
@@ -558,7 +656,6 @@ export default function Inventory() {
         const res = await supabase.from("components").update(payload).eq("id", form.id).select("id").single();
         if (res.error) throw res.error;
 
-        // editing existing: if any pending got added somehow, finalize too
         await finalizePendingPhotos(form.id);
         await loadPhotos(form.id);
 
@@ -570,7 +667,6 @@ export default function Inventory() {
 
         const newId = res.data.id as string;
 
-        // ✅ finalize draft photos into this new component
         await finalizePendingPhotos(newId);
         await loadPhotos(newId);
 
@@ -607,11 +703,10 @@ export default function Inventory() {
     }
   }
 
-  // ✅ NEW: upload works even without a component id
+  // ✅ Upload works even without a component id (draft mode)
   async function uploadPhoto(file: File) {
     const componentId = selectedId ?? form.id;
 
-    // If component exists -> normal flow
     if (componentId) {
       const path = makeStoragePath(componentId, file.name);
 
@@ -637,7 +732,7 @@ export default function Inventory() {
       return;
     }
 
-    // No component yet -> draft upload
+    // Draft upload
     const draftId = draftIdRef.current;
     const tempPath = makeDraftPath(draftId, file.name);
     const previewUrl = URL.createObjectURL(file);
@@ -757,8 +852,6 @@ export default function Inventory() {
   const showEditor = !isMobile || mobileTab === "editor";
 
   // ✅ Choose which “cover” to show in the Photos section:
-  // - If component exists and has saved photos -> use signed url
-  // - Else if draft has photos -> use local preview
   const draftCover = pendingPhotos[0]?.previewUrl ?? "";
   const hasAnyPhotos = photos.length > 0 || pendingPhotos.length > 0;
 
@@ -1170,9 +1263,295 @@ export default function Inventory() {
               </div>
 
               <div style={ui.cardPad}>
-                {/* (identity / placement / tags / seahub sections unchanged in your snippet) */}
-                {/* Keep your existing sections above this Photos section exactly as you had them */}
+                <Section title="Identity">
+                  <div style={isMobile ? ui.formGridMobile : ui.formGrid}>
+                    <Field label="Component name" hint="Required">
+                      <input
+                        className="field"
+                        value={form.name}
+                        onChange={(e) => setForm((p) => ({ ...p, name: e.target.value }))}
+                        placeholder="e.g. Chiller seawater pump"
+                        style={ui.field}
+                      />
+                    </Field>
 
+                    <Field label="Status">
+                      <select
+                        className="field"
+                        value={form.status}
+                        onChange={(e) => setForm((p) => ({ ...p, status: e.target.value }))}
+                        style={ui.field}
+                      >
+                        {statuses.map((s) => (
+                          <option key={s} value={s}>
+                            {s}
+                          </option>
+                        ))}
+                      </select>
+                    </Field>
+
+                    <Field label="Make">
+                      <input
+                        className="field"
+                        value={form.make}
+                        onChange={(e) => setForm((p) => ({ ...p, make: e.target.value }))}
+                        placeholder="e.g. Jabsco"
+                        style={ui.field}
+                      />
+                    </Field>
+
+                    <Field label="Model">
+                      <input
+                        className="field"
+                        value={form.model}
+                        onChange={(e) => setForm((p) => ({ ...p, model: e.target.value }))}
+                        placeholder="e.g. 31640-0092"
+                        style={ui.field}
+                      />
+                    </Field>
+
+                    <Field label="Serial number">
+                      <input
+                        className="field"
+                        value={form.serial_number}
+                        onChange={(e) => setForm((p) => ({ ...p, serial_number: e.target.value }))}
+                        placeholder="Optional"
+                        style={ui.field}
+                      />
+                    </Field>
+
+                    <Field label="Location">
+                      <input
+                        className="field"
+                        value={form.location}
+                        onChange={(e) => setForm((p) => ({ ...p, location: e.target.value }))}
+                        placeholder="e.g. ER port side"
+                        style={ui.field}
+                      />
+                    </Field>
+                  </div>
+                </Section>
+
+                <Section title="Placement">
+                  <div style={isMobile ? ui.formGridMobile : ui.formGrid}>
+                    <Field label="Vessel">
+                      <select
+                        className="field"
+                        value={form.vessel_id}
+                        onChange={(e) => setForm((p) => ({ ...p, vessel_id: e.target.value }))}
+                        style={ui.field}
+                      >
+                        <option value="">Optional</option>
+                        {vessels.map((v) => (
+                          <option key={v.id} value={v.id}>
+                            {v.name}
+                          </option>
+                        ))}
+                      </select>
+                    </Field>
+
+                    <Field label="System">
+                      <select
+                        className="field"
+                        value={form.system_id}
+                        onChange={(e) => setForm((p) => ({ ...p, system_id: e.target.value }))}
+                        style={ui.field}
+                      >
+                        <option value="">Optional</option>
+                        {systems.map((s) => (
+                          <option key={s.id} value={s.id}>
+                            {s.name}
+                          </option>
+                        ))}
+                      </select>
+                    </Field>
+
+                    <Field label="Department">
+                      <select
+                        className="field"
+                        value={form.department_id}
+                        onChange={(e) => setForm((p) => ({ ...p, department_id: e.target.value }))}
+                        style={ui.field}
+                      >
+                        <option value="">Optional</option>
+                        {departments.map((d) => (
+                          <option key={d.id} value={d.id}>
+                            {d.name}
+                          </option>
+                        ))}
+                      </select>
+                    </Field>
+
+                    <Field label="Supplier">
+                      <input
+                        className="field"
+                        value={form.supplier}
+                        onChange={(e) => setForm((p) => ({ ...p, supplier: e.target.value }))}
+                        placeholder="Optional"
+                        style={ui.field}
+                      />
+                    </Field>
+
+                    <Field label="Installed date">
+                      <input
+                        className="field"
+                        type="date"
+                        value={form.installed_at}
+                        onChange={(e) => setForm((p) => ({ ...p, installed_at: e.target.value }))}
+                        style={ui.field}
+                      />
+                    </Field>
+
+                    <Field label="Manual URL" hint="Paste link when available" span={2}>
+                      <input
+                        className="field"
+                        value={form.manual_url}
+                        onChange={(e) => setForm((p) => ({ ...p, manual_url: e.target.value }))}
+                        placeholder="https://…"
+                        style={ui.field}
+                      />
+                    </Field>
+                  </div>
+                </Section>
+
+                <Section
+                  title="Tags & Notes"
+                  right={
+                    tagsPreview.length ? (
+                      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", justifyContent: "flex-end" }}>
+                        {tagsPreview.slice(0, 5).map((t) => (
+                          <Chip key={t} text={t} />
+                        ))}
+                        {tagsPreview.length > 5 ? <span style={ui.moreTag}>+{tagsPreview.length - 5}</span> : null}
+                      </div>
+                    ) : (
+                      <span style={ui.mutedSmall}>No tags yet</span>
+                    )
+                  }
+                >
+                  <div style={isMobile ? ui.formGridMobile : ui.formGrid}>
+                    <Field label="Tags" hint="Comma separated" span={2}>
+                      <input
+                        className="field"
+                        value={form.tagsText}
+                        onChange={(e) => setForm((p) => ({ ...p, tagsText: e.target.value }))}
+                        placeholder="e.g. HVAC, critical-path, spares"
+                        style={ui.field}
+                      />
+                    </Field>
+
+                    <Field label="Notes" span={2}>
+                      <textarea
+                        className="field"
+                        value={form.notes}
+                        onChange={(e) => setForm((p) => ({ ...p, notes: e.target.value }))}
+                        placeholder="Add service notes, observations, part numbers, etc."
+                        style={{ ...ui.field, minHeight: 110, resize: "vertical", lineHeight: 1.45 }}
+                      />
+                    </Field>
+                  </div>
+                </Section>
+
+                <Section title="SeaHub">
+                  <div style={ui.seahubRow}>
+                    <label style={ui.toggleLarge}>
+                      <input
+                        type="checkbox"
+                        checked={form.seahub_synced}
+                        onChange={(e) => setForm((p) => ({ ...p, seahub_synced: e.target.checked }))}
+                      />
+                      <div style={{ display: "flex", flexDirection: "column" }}>
+                        <span style={{ fontWeight: 850 }}>Synced to SeaHub</span>
+                        <span style={ui.mutedSmall}>Use this to flag items already mirrored in SeaHub.</span>
+                      </div>
+                    </label>
+
+                    <div style={{ flex: 1, minWidth: 240 }}>
+                      <Field label="SeaHub reference" hint="Optional">
+                        <input
+                          className="field"
+                          value={form.seahub_ref}
+                          onChange={(e) => setForm((p) => ({ ...p, seahub_ref: e.target.value }))}
+                          placeholder="e.g. SH-INV-01923"
+                          style={ui.field}
+                        />
+                      </Field>
+                    </div>
+                  </div>
+                </Section>
+
+                {/* ✅ QR section */}
+                {isEditing ? (
+                  <Section
+                    title="QR Code"
+                    right={
+                      <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                        <button
+                          className="btn"
+                          style={ui.btnGhost}
+                          onClick={async () => {
+                            try {
+                              const link = getComponentDeepLink(form.id);
+                              if (navigator.clipboard?.writeText) {
+                                await navigator.clipboard.writeText(link);
+                                showToast("success", "Link copied.");
+                              } else {
+                                showToast("info", "Clipboard not available in this browser.");
+                              }
+                            } catch {
+                              showToast("error", "Couldn’t copy link.", "Error");
+                            }
+                          }}
+                          title="Copy deep link"
+                        >
+                          Copy link
+                        </button>
+
+                        <button
+                          className="btn"
+                          style={ui.btnPrimary}
+                          onClick={() => printComponentQr({ id: form.id, name: form.name || "Component" })}
+                          title="Print QR label"
+                        >
+                          Print QR
+                        </button>
+                      </div>
+                    }
+                  >
+                    <div style={{ display: "flex", gap: 14, alignItems: "center", flexWrap: "wrap" }}>
+                      <div
+                        style={{
+                          width: 160,
+                          height: 160,
+                          padding: 10,
+                          borderRadius: 16,
+                          border: "1px solid rgba(2,6,23,0.10)",
+                          background: "rgba(255,255,255,0.85)",
+                        }}
+                        title="Scan to open this component"
+                      >
+                        <QRCode id="component-qr-svg" value={getComponentDeepLink(form.id)} size={140} />
+                      </div>
+
+                      <div style={{ minWidth: 240, flex: 1 }}>
+                        <div style={{ fontWeight: 900, marginBottom: 6 }}>Scan to open this item</div>
+                        <div style={{ ...ui.mutedSmall, wordBreak: "break-all" }}>{getComponentDeepLink(form.id)}</div>
+                        <div style={{ ...ui.mutedTiny, marginTop: 8 }}>
+                          Tip: print and stick this on the equipment — scanning jumps straight into Obsidian Ops.
+                        </div>
+                      </div>
+                    </div>
+                  </Section>
+                ) : (
+                  <Section title="QR Code">
+                    <div style={ui.photoEmpty}>
+                      <div style={ui.emptyTitle}>Create the component to generate its QR code.</div>
+                      <div style={ui.emptySub}>Once created, you can print a label that opens this item instantly.</div>
+                    </div>
+                  </Section>
+                )}
+
+                {/* Photos */}
                 <Section
                   title="Photos"
                   right={
@@ -1246,9 +1625,7 @@ export default function Inventory() {
                           )}
                           <div style={ui.coverOverlay}>
                             <div style={ui.coverTitle}>{photos.length ? "Cover" : "Draft"}</div>
-                            <div style={ui.coverSub}>
-                              {(photos.length || 0) + (pendingPhotos.length || 0)} photos
-                            </div>
+                            <div style={ui.coverSub}>{(photos.length || 0) + (pendingPhotos.length || 0)} photos</div>
                           </div>
                         </div>
                       </a>
@@ -1278,7 +1655,7 @@ export default function Inventory() {
                           </a>
                         ))}
 
-                        {/* draft photos (skip draft cover) */}
+                        {/* draft photos (skip draft cover when there are no saved photos) */}
                         {pendingPhotos.slice(photos.length ? 0 : 1).map((p) => (
                           <a
                             key={p.tempPath}
@@ -1289,11 +1666,7 @@ export default function Inventory() {
                             title="Draft photo"
                           >
                             <div style={ui.photoCard} className="photoHover">
-                              <img
-                                src={p.previewUrl}
-                                alt="Draft"
-                                style={{ width: "100%", height: "100%", objectFit: "cover" }}
-                              />
+                              <img src={p.previewUrl} alt="Draft" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
                             </div>
                           </a>
                         ))}
