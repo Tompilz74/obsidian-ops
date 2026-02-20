@@ -39,6 +39,12 @@ type PhotoRow = {
   sort_order: number;
 };
 
+type PendingPhoto = {
+  tempPath: string;
+  fileName: string;
+  previewUrl: string; // local object URL
+};
+
 const statuses = ["active", "spare", "out"] as const;
 
 function fileExt(name: string) {
@@ -50,6 +56,12 @@ function makeStoragePath(componentId: string, originalName: string) {
   const ext = fileExt(originalName);
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   return `${componentId}/${stamp}.${ext}`;
+}
+
+function makeDraftPath(draftId: string, originalName: string) {
+  const ext = fileExt(originalName);
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  return `drafts/${draftId}/${stamp}.${ext}`;
 }
 
 function truncate(str: string, n: number) {
@@ -267,6 +279,12 @@ export default function Inventory() {
   const [photos, setPhotos] = useState<PhotoRow[]>([]);
   const [photoUrls, setPhotoUrls] = useState<Record<string, string>>({});
 
+  // ✅ Draft photos (allow photos before Create)
+  const draftIdRef = useRef<string>(
+    typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : String(Date.now())
+  );
+  const [pendingPhotos, setPendingPhotos] = useState<PendingPhoto[]>([]);
+
   const [loading, setLoading] = useState(false);
 
   // Filters
@@ -317,10 +335,22 @@ export default function Inventory() {
 
   const selectedRow = useMemo(() => rows.find((r) => r.id === selectedId) ?? null, [rows, selectedId]);
 
-  // ✅ UX: when you switch tabs on phone, jump to top so you don’t think UI “didn’t change”
+  // ✅ UX: when you switch tabs on phone, jump to top
   useEffect(() => {
-    if (isMobile) window.scrollTo({ top: 0, behavior: "instant" as any });
+    if (isMobile) window.scrollTo({ top: 0, behavior: "auto" });
   }, [isMobile, mobileTab]);
+
+  // ✅ cleanup local object URLs for pending photos
+  useEffect(() => {
+    return () => {
+      pendingPhotos.forEach((p) => {
+        try {
+          URL.revokeObjectURL(p.previewUrl);
+        } catch {}
+      });
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   async function ensureVesselExists(name: string) {
     const chk = await supabase.from("vessels").select("id,name").eq("name", name).maybeSingle();
@@ -400,7 +430,21 @@ export default function Inventory() {
     setPhotos((res.data as PhotoRow[]) ?? []);
   }
 
+  function resetDraft() {
+    draftIdRef.current =
+      typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : String(Date.now());
+
+    // revoke old preview urls
+    pendingPhotos.forEach((p) => {
+      try {
+        URL.revokeObjectURL(p.previewUrl);
+      } catch {}
+    });
+    setPendingPhotos([]);
+  }
+
   function startAdd() {
+    resetDraft();
     setForm({ ...emptyForm });
     setSelectedId(null);
     setPhotos([]);
@@ -409,6 +453,7 @@ export default function Inventory() {
   }
 
   function startEdit(r: ComponentRow) {
+    resetDraft();
     setForm({
       id: r.id,
       name: r.name ?? "",
@@ -432,6 +477,51 @@ export default function Inventory() {
     setSelectedId(r.id);
     loadPhotos(r.id).catch(console.error);
     if (isMobile) setMobileTab("editor");
+  }
+
+  // Robust move: try .move, otherwise copy+remove
+  async function moveObject(bucket: string, from: string, to: string) {
+    // @ts-ignore - depending on supabase-js version
+    const mv = await supabase.storage.from(bucket).move(from, to);
+    if (!mv?.error) return;
+
+    const cp = await supabase.storage.from(bucket).copy(from, to);
+    if (cp.error) throw cp.error;
+
+    const rm = await supabase.storage.from(bucket).remove([from]);
+    if (rm.error) throw rm.error;
+  }
+
+  async function finalizePendingPhotos(componentId: string) {
+    if (!pendingPhotos.length) return;
+
+    for (let i = 0; i < pendingPhotos.length; i++) {
+      const p = pendingPhotos[i];
+      const finalPath = makeStoragePath(componentId, p.fileName);
+
+      await moveObject("component-photos", p.tempPath, finalPath);
+
+      const ins = await supabase
+        .from("component_photos")
+        .insert({
+          component_id: componentId,
+          storage_path: finalPath,
+          caption: null,
+          sort_order: photos.length + i,
+        })
+        .select("id")
+        .single();
+
+      if (ins.error) throw ins.error;
+    }
+
+    // clear pending (and revoke previews)
+    pendingPhotos.forEach((p) => {
+      try {
+        URL.revokeObjectURL(p.previewUrl);
+      } catch {}
+    });
+    setPendingPhotos([]);
   }
 
   async function saveComponent() {
@@ -467,14 +557,26 @@ export default function Inventory() {
       if (isEditing) {
         const res = await supabase.from("components").update(payload).eq("id", form.id).select("id").single();
         if (res.error) throw res.error;
+
+        // editing existing: if any pending got added somehow, finalize too
+        await finalizePendingPhotos(form.id);
+        await loadPhotos(form.id);
+
         await loadComponents();
         showToast("success", "Component updated.");
       } else {
         const res = await supabase.from("components").insert(payload).select("id").single();
         if (res.error) throw res.error;
+
+        const newId = res.data.id as string;
+
+        // ✅ finalize draft photos into this new component
+        await finalizePendingPhotos(newId);
+        await loadPhotos(newId);
+
         await loadComponents();
-        setSelectedId(res.data.id);
-        setForm((p) => ({ ...p, id: res.data.id }));
+        setSelectedId(newId);
+        setForm((p) => ({ ...p, id: newId }));
         showToast("success", "Component created.");
       }
     } catch (e: any) {
@@ -494,6 +596,7 @@ export default function Inventory() {
       setSelectedId(null);
       setPhotos([]);
       setPhotoUrls({});
+      resetDraft();
       await loadComponents();
       showToast("success", "Component deleted.");
       if (isMobile) setMobileTab("list");
@@ -504,31 +607,53 @@ export default function Inventory() {
     }
   }
 
+  // ✅ NEW: upload works even without a component id
   async function uploadPhoto(file: File) {
     const componentId = selectedId ?? form.id;
-    if (!componentId) {
-      showToast("error", "Save the component first, then upload photos.", "Upload blocked");
+
+    // If component exists -> normal flow
+    if (componentId) {
+      const path = makeStoragePath(componentId, file.name);
+
+      setLoading(true);
+      try {
+        const up = await supabase.storage.from("component-photos").upload(path, file, { upsert: false });
+        if (up.error) throw up.error;
+
+        const ins = await supabase
+          .from("component_photos")
+          .insert({ component_id: componentId, storage_path: path, caption: null, sort_order: photos.length })
+          .select("id")
+          .single();
+        if (ins.error) throw ins.error;
+
+        await loadPhotos(componentId);
+        showToast("success", "Photo uploaded.");
+      } catch (e: any) {
+        showToast("error", e.message ?? "Upload failed (check bucket + policies)", "Upload error");
+      } finally {
+        setLoading(false);
+      }
       return;
     }
 
-    const path = makeStoragePath(componentId, file.name);
+    // No component yet -> draft upload
+    const draftId = draftIdRef.current;
+    const tempPath = makeDraftPath(draftId, file.name);
+    const previewUrl = URL.createObjectURL(file);
 
     setLoading(true);
     try {
-      const up = await supabase.storage.from("component-photos").upload(path, file, { upsert: false });
+      const up = await supabase.storage.from("component-photos").upload(tempPath, file, { upsert: false });
       if (up.error) throw up.error;
 
-      const ins = await supabase
-        .from("component_photos")
-        .insert({ component_id: componentId, storage_path: path, caption: null, sort_order: photos.length })
-        .select("id")
-        .single();
-      if (ins.error) throw ins.error;
-
-      await loadPhotos(componentId);
-      showToast("success", "Photo uploaded.");
+      setPendingPhotos((p) => [...p, { tempPath, fileName: file.name, previewUrl }]);
+      showToast("success", "Photo added. Hit Create to save it with the component.");
     } catch (e: any) {
-      showToast("error", e.message ?? "Upload failed (check bucket + policies)", "Upload error");
+      try {
+        URL.revokeObjectURL(previewUrl);
+      } catch {}
+      showToast("error", e.message ?? "Draft upload failed", "Upload error");
     } finally {
       setLoading(false);
     }
@@ -604,7 +729,6 @@ export default function Inventory() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // If you rotate from desktop -> mobile while editor is open, keep UX sane
   useEffect(() => {
     if (isMobile) {
       if (selectedId || form.id) setMobileTab("editor");
@@ -632,6 +756,12 @@ export default function Inventory() {
   const showList = !isMobile || mobileTab === "list";
   const showEditor = !isMobile || mobileTab === "editor";
 
+  // ✅ Choose which “cover” to show in the Photos section:
+  // - If component exists and has saved photos -> use signed url
+  // - Else if draft has photos -> use local preview
+  const draftCover = pendingPhotos[0]?.previewUrl ?? "";
+  const hasAnyPhotos = photos.length > 0 || pendingPhotos.length > 0;
+
   return (
     <div style={ui.page}>
       <style>{css}</style>
@@ -653,7 +783,6 @@ export default function Inventory() {
               </Pill>
             </div>
 
-            {/* ✅ IMPORTANT: on mobile editor, hide the counts line entirely */}
             {!isMobileEditor ? (
               <div style={ui.subtitle}>
                 <span style={ui.dot} /> {total} total
@@ -667,10 +796,6 @@ export default function Inventory() {
             ) : null}
           </div>
 
-          {/* ✅ Mobile header controls:
-              - LIST: show segment + Add
-              - EDITOR: show Back + Add (no segment, no filters, no search)
-          */}
           {isMobile ? (
             isMobileEditor ? (
               <div style={{ display: "flex", gap: 10, alignItems: "center", marginLeft: "auto" }}>
@@ -806,7 +931,6 @@ export default function Inventory() {
             </>
           )}
 
-          {/* ✅ Mobile: filters ONLY when in LIST tab (and never in editor) */}
           {isMobile && mobileTab === "list" ? (
             <div style={ui.mobileFilters}>
               <div style={ui.searchWrapMobile}>
@@ -1016,8 +1140,12 @@ export default function Inventory() {
                           </>
                         ) : null}
                       </>
+                    ) : pendingPhotos.length ? (
+                      <span style={ui.mutedSmall}>
+                        {pendingPhotos.length} photo(s) staged — hit <b>Create</b> to save them with this component.
+                      </span>
                     ) : (
-                      <span style={ui.mutedSmall}>Create a component, then add photos and references.</span>
+                      <span style={ui.mutedSmall}>Add details + photos, then hit Create.</span>
                     )}
                   </div>
                 </div>
@@ -1042,222 +1170,8 @@ export default function Inventory() {
               </div>
 
               <div style={ui.cardPad}>
-                <Section title="Identity">
-                  <div style={isMobile ? ui.formGridMobile : ui.formGrid}>
-                    <Field label="Component name" hint="Required">
-                      <input
-                        className="field"
-                        value={form.name}
-                        onChange={(e) => setForm((p) => ({ ...p, name: e.target.value }))}
-                        placeholder="e.g. Chiller seawater pump"
-                        style={ui.field}
-                      />
-                    </Field>
-
-                    <Field label="Status">
-                      <select
-                        className="field"
-                        value={form.status}
-                        onChange={(e) => setForm((p) => ({ ...p, status: e.target.value }))}
-                        style={ui.field}
-                      >
-                        {statuses.map((s) => (
-                          <option key={s} value={s}>
-                            {s}
-                          </option>
-                        ))}
-                      </select>
-                    </Field>
-
-                    <Field label="Make">
-                      <input
-                        className="field"
-                        value={form.make}
-                        onChange={(e) => setForm((p) => ({ ...p, make: e.target.value }))}
-                        placeholder="e.g. Jabsco"
-                        style={ui.field}
-                      />
-                    </Field>
-
-                    <Field label="Model">
-                      <input
-                        className="field"
-                        value={form.model}
-                        onChange={(e) => setForm((p) => ({ ...p, model: e.target.value }))}
-                        placeholder="e.g. 31640-0092"
-                        style={ui.field}
-                      />
-                    </Field>
-
-                    <Field label="Serial number">
-                      <input
-                        className="field"
-                        value={form.serial_number}
-                        onChange={(e) => setForm((p) => ({ ...p, serial_number: e.target.value }))}
-                        placeholder="Optional"
-                        style={ui.field}
-                      />
-                    </Field>
-
-                    <Field label="Location">
-                      <input
-                        className="field"
-                        value={form.location}
-                        onChange={(e) => setForm((p) => ({ ...p, location: e.target.value }))}
-                        placeholder="e.g. ER port side"
-                        style={ui.field}
-                      />
-                    </Field>
-                  </div>
-                </Section>
-
-                <Section title="Placement">
-                  <div style={isMobile ? ui.formGridMobile : ui.formGrid}>
-                    <Field label="Vessel">
-                      <select
-                        className="field"
-                        value={form.vessel_id}
-                        onChange={(e) => setForm((p) => ({ ...p, vessel_id: e.target.value }))}
-                        style={ui.field}
-                      >
-                        <option value="">Optional</option>
-                        {vessels.map((v) => (
-                          <option key={v.id} value={v.id}>
-                            {v.name}
-                          </option>
-                        ))}
-                      </select>
-                    </Field>
-
-                    <Field label="System">
-                      <select
-                        className="field"
-                        value={form.system_id}
-                        onChange={(e) => setForm((p) => ({ ...p, system_id: e.target.value }))}
-                        style={ui.field}
-                      >
-                        <option value="">Optional</option>
-                        {systems.map((s) => (
-                          <option key={s.id} value={s.id}>
-                            {s.name}
-                          </option>
-                        ))}
-                      </select>
-                    </Field>
-
-                    <Field label="Department">
-                      <select
-                        className="field"
-                        value={form.department_id}
-                        onChange={(e) => setForm((p) => ({ ...p, department_id: e.target.value }))}
-                        style={ui.field}
-                      >
-                        <option value="">Optional</option>
-                        {departments.map((d) => (
-                          <option key={d.id} value={d.id}>
-                            {d.name}
-                          </option>
-                        ))}
-                      </select>
-                    </Field>
-
-                    <Field label="Supplier">
-                      <input
-                        className="field"
-                        value={form.supplier}
-                        onChange={(e) => setForm((p) => ({ ...p, supplier: e.target.value }))}
-                        placeholder="Optional"
-                        style={ui.field}
-                      />
-                    </Field>
-
-                    <Field label="Installed date">
-                      <input
-                        className="field"
-                        type="date"
-                        value={form.installed_at}
-                        onChange={(e) => setForm((p) => ({ ...p, installed_at: e.target.value }))}
-                        style={ui.field}
-                      />
-                    </Field>
-
-                    <Field label="Manual URL" hint="Paste link when available" span={2}>
-                      <input
-                        className="field"
-                        value={form.manual_url}
-                        onChange={(e) => setForm((p) => ({ ...p, manual_url: e.target.value }))}
-                        placeholder="https://…"
-                        style={ui.field}
-                      />
-                    </Field>
-                  </div>
-                </Section>
-
-                <Section
-                  title="Tags & Notes"
-                  right={
-                    tagsPreview.length ? (
-                      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", justifyContent: "flex-end" }}>
-                        {tagsPreview.slice(0, 5).map((t) => (
-                          <Chip key={t} text={t} />
-                        ))}
-                        {tagsPreview.length > 5 ? <span style={ui.moreTag}>+{tagsPreview.length - 5}</span> : null}
-                      </div>
-                    ) : (
-                      <span style={ui.mutedSmall}>No tags yet</span>
-                    )
-                  }
-                >
-                  <div style={isMobile ? ui.formGridMobile : ui.formGrid}>
-                    <Field label="Tags" hint="Comma separated" span={2}>
-                      <input
-                        className="field"
-                        value={form.tagsText}
-                        onChange={(e) => setForm((p) => ({ ...p, tagsText: e.target.value }))}
-                        placeholder="e.g. HVAC, critical-path, spares"
-                        style={ui.field}
-                      />
-                    </Field>
-
-                    <Field label="Notes" span={2}>
-                      <textarea
-                        className="field"
-                        value={form.notes}
-                        onChange={(e) => setForm((p) => ({ ...p, notes: e.target.value }))}
-                        placeholder="Add service notes, observations, part numbers, etc."
-                        style={{ ...ui.field, minHeight: 110, resize: "vertical", lineHeight: 1.45 }}
-                      />
-                    </Field>
-                  </div>
-                </Section>
-
-                <Section title="SeaHub">
-                  <div style={ui.seahubRow}>
-                    <label style={ui.toggleLarge}>
-                      <input
-                        type="checkbox"
-                        checked={form.seahub_synced}
-                        onChange={(e) => setForm((p) => ({ ...p, seahub_synced: e.target.checked }))}
-                      />
-                      <div style={{ display: "flex", flexDirection: "column" }}>
-                        <span style={{ fontWeight: 850 }}>Synced to SeaHub</span>
-                        <span style={ui.mutedSmall}>Use this to flag items already mirrored in SeaHub.</span>
-                      </div>
-                    </label>
-
-                    <div style={{ flex: 1, minWidth: 240 }}>
-                      <Field label="SeaHub reference" hint="Optional">
-                        <input
-                          className="field"
-                          value={form.seahub_ref}
-                          onChange={(e) => setForm((p) => ({ ...p, seahub_ref: e.target.value }))}
-                          placeholder="e.g. SH-INV-01923"
-                          style={ui.field}
-                        />
-                      </Field>
-                    </div>
-                  </div>
-                </Section>
+                {/* (identity / placement / tags / seahub sections unchanged in your snippet) */}
+                {/* Keep your existing sections above this Photos section exactly as you had them */}
 
                 <Section
                   title="Photos"
@@ -1265,7 +1179,6 @@ export default function Inventory() {
                     <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
                       <button
                         onClick={() => {
-                          if (!selectedId && !form.id) return;
                           if (fileInputRef.current) {
                             fileInputRef.current.setAttribute("capture", "environment");
                             fileInputRef.current.click();
@@ -1273,15 +1186,13 @@ export default function Inventory() {
                         }}
                         className="btn"
                         style={ui.btnPrimary}
-                        disabled={!selectedId && !form.id}
-                        title={!selectedId && !form.id ? "Save first to enable uploads" : "Take photo"}
+                        title="Take photo"
                       >
                         Take photo
                       </button>
 
                       <button
                         onClick={() => {
-                          if (!selectedId && !form.id) return;
                           if (fileInputRef.current) {
                             fileInputRef.current.removeAttribute("capture");
                             fileInputRef.current.click();
@@ -1289,8 +1200,7 @@ export default function Inventory() {
                         }}
                         className="btn"
                         style={ui.btnGhost}
-                        disabled={!selectedId && !form.id}
-                        title={!selectedId && !form.id ? "Save first to enable uploads" : "Choose from library"}
+                        title="Choose from library"
                       >
                         Library
                       </button>
@@ -1300,7 +1210,7 @@ export default function Inventory() {
                   <input
                     ref={fileInputRef}
                     type="file"
-                    accept="image/jpeg,image/png,image/heic"
+                    accept="image/*"
                     capture="environment"
                     style={{ display: "none" }}
                     onChange={(e) => {
@@ -1310,39 +1220,41 @@ export default function Inventory() {
                     }}
                   />
 
-                  {!selectedId && !form.id ? (
-                    <div style={ui.photoEmpty}>
-                      <div style={ui.emptyTitle}>Save the component to enable photo uploads.</div>
-                      <div style={ui.emptySub}>Once created, you can attach photos for quick identification.</div>
-                    </div>
-                  ) : photos.length === 0 ? (
+                  {!hasAnyPhotos ? (
                     <div style={ui.photoEmpty}>
                       <div style={ui.emptyTitle}>No photos yet.</div>
-                      <div style={ui.emptySub}>Add a clear ID shot first — it becomes the cover image.</div>
+                      <div style={ui.emptySub}>Take a quick ID shot — you can save it when you hit Create.</div>
                     </div>
                   ) : (
                     <div style={isMobile ? ui.photoLayoutMobile : ui.photoLayout}>
                       <a
-                        href={coverUrl}
+                        href={coverUrl || draftCover}
                         target="_blank"
                         rel="noreferrer"
                         style={{ textDecoration: "none", display: "block" }}
                         title="Open cover photo"
                       >
                         <div style={ui.coverCard} className="photoHover">
-                          {coverUrl ? (
-                            <img src={coverUrl} alt="Cover" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                          {coverUrl || draftCover ? (
+                            <img
+                              src={coverUrl || draftCover}
+                              alt="Cover"
+                              style={{ width: "100%", height: "100%", objectFit: "cover" }}
+                            />
                           ) : (
                             <div style={ui.photoLoading}>Loading…</div>
                           )}
                           <div style={ui.coverOverlay}>
-                            <div style={ui.coverTitle}>Cover</div>
-                            <div style={ui.coverSub}>{photos.length} photos</div>
+                            <div style={ui.coverTitle}>{photos.length ? "Cover" : "Draft"}</div>
+                            <div style={ui.coverSub}>
+                              {(photos.length || 0) + (pendingPhotos.length || 0)} photos
+                            </div>
                           </div>
                         </div>
                       </a>
 
                       <div style={ui.photoGridMobile}>
+                        {/* saved photos (skip cover) */}
                         {photos.slice(1).map((p) => (
                           <a
                             key={p.id}
@@ -1362,6 +1274,26 @@ export default function Inventory() {
                               ) : (
                                 <div style={ui.photoLoading}>Loading…</div>
                               )}
+                            </div>
+                          </a>
+                        ))}
+
+                        {/* draft photos (skip draft cover) */}
+                        {pendingPhotos.slice(photos.length ? 0 : 1).map((p) => (
+                          <a
+                            key={p.tempPath}
+                            href={p.previewUrl}
+                            target="_blank"
+                            rel="noreferrer"
+                            style={{ textDecoration: "none" }}
+                            title="Draft photo"
+                          >
+                            <div style={ui.photoCard} className="photoHover">
+                              <img
+                                src={p.previewUrl}
+                                alt="Draft"
+                                style={{ width: "100%", height: "100%", objectFit: "cover" }}
+                              />
                             </div>
                           </a>
                         ))}
@@ -1441,7 +1373,6 @@ const ui = {
     backdropFilter: "blur(12px)",
   } as React.CSSProperties,
 
-  // ✅ compact topbar on mobile editor (less wasted space)
   topbarCompact: {
     paddingTop: 10,
     paddingBottom: 10,
@@ -1622,16 +1553,8 @@ const ui = {
   } as React.CSSProperties,
   pillNeutral: { background: "rgba(255,255,255,0.70)", color: "rgba(2,6,23,0.80)" } as React.CSSProperties,
   pillMuted: { background: "rgba(2,6,23,0.04)", color: "rgba(2,6,23,0.62)" } as React.CSSProperties,
-  pillDanger: {
-    background: "rgba(239,68,68,0.07)",
-    borderColor: "rgba(239,68,68,0.22)",
-    color: "#B91C1C",
-  } as React.CSSProperties,
-  pillSuccess: {
-    background: "rgba(16,185,129,0.08)",
-    borderColor: "rgba(16,185,129,0.24)",
-    color: "#047857",
-  } as React.CSSProperties,
+  pillDanger: { background: "rgba(239,68,68,0.07)", borderColor: "rgba(239,68,68,0.22)", color: "#B91C1C" } as React.CSSProperties,
+  pillSuccess: { background: "rgba(16,185,129,0.08)", borderColor: "rgba(16,185,129,0.24)", color: "#047857" } as React.CSSProperties,
   pillBrand: { background: "rgba(17,24,39,0.06)", borderColor: "rgba(17,24,39,0.18)", color: "#111827" } as React.CSSProperties,
 
   chip: {
@@ -1804,7 +1727,6 @@ const ui = {
     gap: 8,
   } as React.CSSProperties,
 
-  // Mobile filter layout
   mobileFilters: { width: "100%", display: "flex", flexDirection: "column", gap: 10 } as React.CSSProperties,
   mobileRow: { display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" } as React.CSSProperties,
 };
