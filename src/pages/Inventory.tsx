@@ -121,6 +121,8 @@ function printComponentQr(opts: { id: string; name: string }) {
   const w = window.open("", "_blank", "noopener,noreferrer,width=520,height=720");
   if (!w) return;
 
+  // Write HTML
+  w.document.open();
   w.document.write(`
     <html>
       <head>
@@ -143,23 +145,24 @@ function printComponentQr(opts: { id: string; name: string }) {
           <div class="hint">Scan to open this item</div>
           <div class="link">${escapeHtml(link)}</div>
         </div>
-        <script>
-          window.onload = () => window.print();
-        </script>
       </body>
     </html>
   `);
-
   w.document.close();
 
-  // Clone the QR SVG from the current page into the print window
-  setTimeout(() => {
+  // Inject QR SVG then print
+  const injectAndPrint = () => {
     const mount = w.document.getElementById("qr-mount");
-    if (!mount) return;
+    if (!mount) {
+      w.setTimeout(injectAndPrint, 50);
+      return;
+    }
 
     const svg = document.getElementById("component-qr-svg") as SVGElement | null;
     if (!svg) {
       mount.innerHTML = "<div style='opacity:.7'>QR not available</div>";
+      w.focus();
+      w.print();
       return;
     }
 
@@ -170,7 +173,15 @@ function printComponentQr(opts: { id: string; name: string }) {
 
     mount.innerHTML = "";
     mount.appendChild(cloned);
-  }, 150);
+
+    w.setTimeout(() => {
+      w.focus();
+      w.print();
+    }, 80);
+  };
+
+  // Run when the new window finishes loading
+  w.onload = injectAndPrint;
 }
 
 /** --------------------- Small UI primitives --------------------- */
@@ -1666,7 +1677,11 @@ export default function Inventory() {
                             title="Draft photo"
                           >
                             <div style={ui.photoCard} className="photoHover">
-                              <img src={p.previewUrl} alt="Draft" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                              <img
+                                src={p.previewUrl}
+                                alt="Draft"
+                                style={{ width: "100%", height: "100%", objectFit: "cover" }}
+                              />
                             </div>
                           </a>
                         ))}
