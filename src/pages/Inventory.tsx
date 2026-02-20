@@ -56,7 +56,28 @@ function truncate(str: string, n: number) {
   return str.length > n ? str.slice(0, n - 1) + "…" : str;
 }
 
-/** --------------------- Small UI primitives (no deps) --------------------- */
+function useMediaQuery(query: string) {
+  const [matches, setMatches] = useState(() => {
+    if (typeof window === "undefined") return false;
+    return window.matchMedia(query).matches;
+  });
+
+  useEffect(() => {
+    const m = window.matchMedia(query);
+    const onChange = () => setMatches(m.matches);
+    onChange();
+    if (m.addEventListener) m.addEventListener("change", onChange);
+    else m.addListener(onChange);
+    return () => {
+      if (m.removeEventListener) m.removeEventListener("change", onChange);
+      else m.removeListener(onChange);
+    };
+  }, [query]);
+
+  return matches;
+}
+
+/** --------------------- Small UI primitives --------------------- */
 
 function Pill({
   children,
@@ -67,7 +88,6 @@ function Pill({
   tone?: "neutral" | "danger" | "success" | "brand" | "muted";
   uppercase?: boolean;
 }) {
-  const base = ui.pill;
   const toneStyle =
     tone === "danger"
       ? ui.pillDanger
@@ -80,13 +100,7 @@ function Pill({
       : ui.pillNeutral;
 
   return (
-    <span
-      style={{
-        ...base,
-        ...toneStyle,
-        ...(uppercase ? { letterSpacing: "0.14em" } : null),
-      }}
-    >
+    <span style={{ ...ui.pill, ...toneStyle, ...(uppercase ? { letterSpacing: "0.14em" } : null) }}>
       {uppercase ? String(children).toUpperCase() : children}
     </span>
   );
@@ -108,12 +122,7 @@ function Field({
   span?: 1 | 2;
 }) {
   return (
-    <div
-      style={{
-        ...ui.fieldWrap,
-        gridColumn: span === 2 ? "1 / -1" : undefined,
-      }}
-    >
+    <div style={{ ...ui.fieldWrap, gridColumn: span === 2 ? "1 / -1" : undefined }}>
       <div style={ui.labelRow}>
         <div style={ui.label}>{label}</div>
         {hint ? <div style={ui.hint}>{hint}</div> : null}
@@ -174,7 +183,7 @@ function Toast({
   );
 }
 
-/** --------------------- List row (table-like) --------------------- */
+/** --------------------- List row --------------------- */
 
 function ListRow({
   r,
@@ -194,17 +203,9 @@ function ListRow({
   const dept = r.departments?.[0]?.name ?? "";
 
   return (
-    <div
-      onClick={onClick}
-      className="rowHover"
-      style={{
-        ...ui.row,
-        ...(active ? ui.rowActive : null),
-      }}
-    >
+    <div onClick={onClick} className="rowHover" style={{ ...ui.row, ...(active ? ui.rowActive : null) }}>
       <div style={ui.rowAccent(active)} />
       <div style={ui.rowGrid}>
-        {/* Component */}
         <div style={{ minWidth: 0 }}>
           <div style={ui.rowNameLine}>
             <div style={ui.rowName} title={r.name}>
@@ -228,7 +229,6 @@ function ListRow({
           </div>
         </div>
 
-        {/* Location */}
         <div style={{ minWidth: 0 }}>
           <div style={ui.colTitle}>{r.location ?? "—"}</div>
           <div style={ui.mutedSmall} title={[vessel, system, dept].filter(Boolean).join(" • ")}>
@@ -236,11 +236,8 @@ function ListRow({
           </div>
         </div>
 
-        {/* Status */}
         <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 8 }}>
-          <Pill tone={r.status === "out" ? "danger" : r.status === "spare" ? "muted" : "brand"}>
-            {r.status}
-          </Pill>
+          <Pill tone={r.status === "out" ? "danger" : r.status === "spare" ? "muted" : "brand"}>{r.status}</Pill>
           <div style={ui.mutedTiny}>{r.serial_number ? `S/N ${truncate(r.serial_number, 18)}` : "No serial"}</div>
         </div>
       </div>
@@ -248,9 +245,12 @@ function ListRow({
   );
 }
 
-/** --------------------- Main page --------------------- */
+/** --------------------- Main --------------------- */
 
 export default function Inventory() {
+  const isMobile = useMediaQuery("(max-width: 980px)");
+  const [mobileTab, setMobileTab] = useState<"list" | "editor">("list");
+
   const [vessels, setVessels] = useState<Option[]>([]);
   const [systems, setSystems] = useState<Option[]>([]);
   const [departments, setDepartments] = useState<Option[]>([]);
@@ -269,8 +269,6 @@ export default function Inventory() {
   const [departmentId, setDepartmentId] = useState<string>("all");
   const [status, setStatus] = useState<string>("all");
   const [criticalOnly, setCriticalOnly] = useState(false);
-
-  // ✅ SeaHub 3-state filter
   const [seahubFilter, setSeahubFilter] = useState<"all" | "synced" | "unsynced">("all");
 
   // Toast
@@ -313,23 +311,15 @@ export default function Inventory() {
   const selectedRow = useMemo(() => rows.find((r) => r.id === selectedId) ?? null, [rows, selectedId]);
 
   async function ensureVesselExists(name: string) {
-    // Best-effort. If RLS blocks insert, we just move on.
     const chk = await supabase.from("vessels").select("id,name").eq("name", name).maybeSingle();
-    if (chk.error) {
-      // Don’t hard-fail lookup load for this.
-      return;
-    }
+    if (chk.error) return;
     if (!chk.data) {
       const ins = await supabase.from("vessels").insert({ name }).select("id").single();
-      if (ins.error) {
-        // If policies block this, user can add manually in Supabase.
-        showToast("info", `Couldn’t auto-create vessel "${name}". Add it in Supabase if needed.`, "Heads up");
-      }
+      if (ins.error) showToast("info", `Couldn’t auto-create vessel "${name}". Add it in Supabase if needed.`, "Heads up");
     }
   }
 
   async function loadLookups() {
-    // ✅ Ensure Flying Fish exists (best-effort)
     await ensureVesselExists("Flying Fish");
 
     const [v, s, d] = await Promise.all([
@@ -403,6 +393,7 @@ export default function Inventory() {
     setSelectedId(null);
     setPhotos([]);
     setPhotoUrls({});
+    if (isMobile) setMobileTab("editor");
   }
 
   function startEdit(r: ComponentRow) {
@@ -428,6 +419,7 @@ export default function Inventory() {
     });
     setSelectedId(r.id);
     loadPhotos(r.id).catch(console.error);
+    if (isMobile) setMobileTab("editor");
   }
 
   async function saveComponent() {
@@ -486,9 +478,13 @@ export default function Inventory() {
     try {
       const res = await supabase.from("components").delete().eq("id", id);
       if (res.error) throw res.error;
-      startAdd();
+      setForm({ ...emptyForm });
+      setSelectedId(null);
+      setPhotos([]);
+      setPhotoUrls({});
       await loadComponents();
       showToast("success", "Component deleted.");
+      if (isMobile) setMobileTab("list");
     } catch (e: any) {
       showToast("error", e.message ?? "Delete failed", "Error");
     } finally {
@@ -554,7 +550,6 @@ export default function Inventory() {
       if (status !== "all" && r.status !== status) return false;
       if (criticalOnly && !r.critical) return false;
 
-      // ✅ SeaHub 3-state filter
       if (seahubFilter === "synced" && !r.seahub_synced) return false;
       if (seahubFilter === "unsynced" && r.seahub_synced) return false;
 
@@ -597,6 +592,15 @@ export default function Inventory() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // If you rotate from desktop -> mobile while editor is open, keep UX sane
+  useEffect(() => {
+    if (isMobile) {
+      if (selectedId || form.id) setMobileTab("editor");
+      else setMobileTab("list");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isMobile]);
+
   const total = rows.length;
   const totalCrit = useMemo(() => rows.filter((r) => r.critical).length, [rows]);
   const totalSea = useMemo(() => rows.filter((r) => r.seahub_synced).length, [rows]);
@@ -613,11 +617,13 @@ export default function Inventory() {
   const coverPhoto = photos[0];
   const coverUrl = coverPhoto ? photoUrls[coverPhoto.id] : "";
 
+  const showList = !isMobile || mobileTab === "list";
+  const showEditor = !isMobile || mobileTab === "editor";
+
   return (
     <div style={ui.page}>
       <style>{css}</style>
 
-      {/* Toast */}
       <div style={ui.toastWrap}>
         {toast ? (
           <Toast kind={toast.kind} title={toast.title} message={toast.message} onClose={() => setToast(null)} />
@@ -646,507 +652,681 @@ export default function Inventory() {
             </div>
           </div>
 
-          <div style={ui.searchWrap}>
-            <input
-              className="field"
-              value={q}
-              onChange={(e) => setQ(e.target.value)}
-              placeholder="Search components, tags, serials…"
-              style={{ ...ui.field, minWidth: 320 }}
-            />
-            {q.trim() ? (
-              <button onClick={() => setQ("")} style={ui.iconBtn} aria-label="Clear search" title="Clear">
-                ✕
+          {/* Mobile: List/Editor tabs */}
+          {isMobile ? (
+            <div style={{ display: "flex", gap: 10, alignItems: "center", marginLeft: "auto" }}>
+              <div style={ui.segment} title="Switch view">
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={() => setMobileTab("list")}
+                  style={{ ...ui.segmentBtn, ...(mobileTab === "list" ? ui.segmentBtnActive : null) }}
+                >
+                  List
+                </button>
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={() => setMobileTab("editor")}
+                  style={{ ...ui.segmentBtn, ...(mobileTab === "editor" ? ui.segmentBtnActive : null) }}
+                >
+                  Editor
+                </button>
+              </div>
+
+              <button onClick={startAdd} className="btn" style={ui.btnPrimary}>
+                + Add
               </button>
-            ) : null}
-          </div>
+            </div>
+          ) : (
+            <>
+              <div style={ui.searchWrap}>
+                <input
+                  className="field"
+                  value={q}
+                  onChange={(e) => setQ(e.target.value)}
+                  placeholder="Search components, tags, serials…"
+                  style={{ ...ui.field, minWidth: 320 }}
+                />
+                {q.trim() ? (
+                  <button onClick={() => setQ("")} style={ui.iconBtn} aria-label="Clear search" title="Clear">
+                    ✕
+                  </button>
+                ) : null}
+              </div>
 
-          <select className="field" value={vesselId} onChange={(e) => setVesselId(e.target.value)} style={ui.field}>
-            <option value="all">All vessels</option>
-            {vessels.map((v) => (
-              <option key={v.id} value={v.id}>
-                {v.name}
-              </option>
-            ))}
-          </select>
+              <select className="field" value={vesselId} onChange={(e) => setVesselId(e.target.value)} style={ui.field}>
+                <option value="all">All vessels</option>
+                {vessels.map((v) => (
+                  <option key={v.id} value={v.id}>
+                    {v.name}
+                  </option>
+                ))}
+              </select>
 
-          <select className="field" value={systemId} onChange={(e) => setSystemId(e.target.value)} style={ui.field}>
-            <option value="all">All systems</option>
-            {systems.map((s) => (
-              <option key={s.id} value={s.id}>
-                {s.name}
-              </option>
-            ))}
-          </select>
+              <select className="field" value={systemId} onChange={(e) => setSystemId(e.target.value)} style={ui.field}>
+                <option value="all">All systems</option>
+                {systems.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.name}
+                  </option>
+                ))}
+              </select>
 
-          <select className="field" value={departmentId} onChange={(e) => setDepartmentId(e.target.value)} style={ui.field}>
-            <option value="all">All depts</option>
-            {departments.map((d) => (
-              <option key={d.id} value={d.id}>
-                {d.name}
-              </option>
-            ))}
-          </select>
+              <select
+                className="field"
+                value={departmentId}
+                onChange={(e) => setDepartmentId(e.target.value)}
+                style={ui.field}
+              >
+                <option value="all">All depts</option>
+                {departments.map((d) => (
+                  <option key={d.id} value={d.id}>
+                    {d.name}
+                  </option>
+                ))}
+              </select>
 
-          <select className="field" value={status} onChange={(e) => setStatus(e.target.value)} style={ui.field}>
-            <option value="all">All status</option>
-            {statuses.map((s) => (
-              <option key={s} value={s}>
-                {s}
-              </option>
-            ))}
-          </select>
+              <select className="field" value={status} onChange={(e) => setStatus(e.target.value)} style={ui.field}>
+                <option value="all">All status</option>
+                {statuses.map((s) => (
+                  <option key={s} value={s}>
+                    {s}
+                  </option>
+                ))}
+              </select>
 
-          <label style={ui.toggle}>
-            <input type="checkbox" checked={criticalOnly} onChange={(e) => setCriticalOnly(e.target.checked)} />
-            <span>Critical</span>
-          </label>
+              <label style={ui.toggle}>
+                <input type="checkbox" checked={criticalOnly} onChange={(e) => setCriticalOnly(e.target.checked)} />
+                <span>Critical</span>
+              </label>
 
-          {/* ✅ SeaHub segmented filter */}
-          <div style={ui.segment} title="Filter by SeaHub sync status">
-            <button
-              type="button"
-              className="btn"
-              onClick={() => setSeahubFilter("all")}
-              style={{ ...ui.segmentBtn, ...(seahubFilter === "all" ? ui.segmentBtnActive : null) }}
-            >
-              All
-            </button>
-            <button
-              type="button"
-              className="btn"
-              onClick={() => setSeahubFilter("synced")}
-              style={{ ...ui.segmentBtn, ...(seahubFilter === "synced" ? ui.segmentBtnActive : null) }}
-            >
-              SeaHub
-            </button>
-            <button
-              type="button"
-              className="btn"
-              onClick={() => setSeahubFilter("unsynced")}
-              style={{ ...ui.segmentBtn, ...(seahubFilter === "unsynced" ? ui.segmentBtnActive : null) }}
-            >
-              Not synced
-            </button>
-          </div>
+              <div style={ui.segment} title="Filter by SeaHub sync status">
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={() => setSeahubFilter("all")}
+                  style={{ ...ui.segmentBtn, ...(seahubFilter === "all" ? ui.segmentBtnActive : null) }}
+                >
+                  All
+                </button>
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={() => setSeahubFilter("synced")}
+                  style={{ ...ui.segmentBtn, ...(seahubFilter === "synced" ? ui.segmentBtnActive : null) }}
+                >
+                  SeaHub
+                </button>
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={() => setSeahubFilter("unsynced")}
+                  style={{ ...ui.segmentBtn, ...(seahubFilter === "unsynced" ? ui.segmentBtnActive : null) }}
+                >
+                  Not synced
+                </button>
+              </div>
 
-          <button onClick={startAdd} className="btn" style={{ ...ui.btnPrimary, marginLeft: "auto" }}>
-            + Add
-          </button>
-          <button onClick={signOut} className="btn" style={ui.btnGhost}>
-            Sign out
-          </button>
+              <button onClick={startAdd} className="btn" style={{ ...ui.btnPrimary, marginLeft: "auto" }}>
+                + Add
+              </button>
+              <button onClick={signOut} className="btn" style={ui.btnGhost}>
+                Sign out
+              </button>
+            </>
+          )}
+
+          {/* Mobile: filters row (under title) */}
+          {isMobile ? (
+            <div style={ui.mobileFilters}>
+              <div style={ui.searchWrapMobile}>
+                <input
+                  className="field"
+                  value={q}
+                  onChange={(e) => setQ(e.target.value)}
+                  placeholder="Search components, tags, serials…"
+                  style={{ ...ui.field, width: "100%" }}
+                />
+                {q.trim() ? (
+                  <button onClick={() => setQ("")} style={ui.iconBtnMobile} aria-label="Clear search" title="Clear">
+                    ✕
+                  </button>
+                ) : null}
+              </div>
+
+              <div style={ui.mobileRow}>
+                <select className="field" value={vesselId} onChange={(e) => setVesselId(e.target.value)} style={{ ...ui.field, flex: 1 }}>
+                  <option value="all">All vessels</option>
+                  {vessels.map((v) => (
+                    <option key={v.id} value={v.id}>
+                      {v.name}
+                    </option>
+                  ))}
+                </select>
+
+                <select className="field" value={systemId} onChange={(e) => setSystemId(e.target.value)} style={{ ...ui.field, flex: 1 }}>
+                  <option value="all">All systems</option>
+                  {systems.map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div style={ui.mobileRow}>
+                <select className="field" value={departmentId} onChange={(e) => setDepartmentId(e.target.value)} style={{ ...ui.field, flex: 1 }}>
+                  <option value="all">All depts</option>
+                  {departments.map((d) => (
+                    <option key={d.id} value={d.id}>
+                      {d.name}
+                    </option>
+                  ))}
+                </select>
+
+                <select className="field" value={status} onChange={(e) => setStatus(e.target.value)} style={{ ...ui.field, flex: 1 }}>
+                  <option value="all">All status</option>
+                  {statuses.map((s) => (
+                    <option key={s} value={s}>
+                      {s}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div style={ui.mobileRow}>
+                <label style={ui.toggle}>
+                  <input type="checkbox" checked={criticalOnly} onChange={(e) => setCriticalOnly(e.target.checked)} />
+                  <span>Critical</span>
+                </label>
+
+                <div style={{ marginLeft: "auto" }}>
+                  <div style={ui.segment} title="Filter by SeaHub sync status">
+                    <button
+                      type="button"
+                      className="btn"
+                      onClick={() => setSeahubFilter("all")}
+                      style={{ ...ui.segmentBtn, ...(seahubFilter === "all" ? ui.segmentBtnActive : null) }}
+                    >
+                      All
+                    </button>
+                    <button
+                      type="button"
+                      className="btn"
+                      onClick={() => setSeahubFilter("synced")}
+                      style={{ ...ui.segmentBtn, ...(seahubFilter === "synced" ? ui.segmentBtnActive : null) }}
+                    >
+                      SeaHub
+                    </button>
+                    <button
+                      type="button"
+                      className="btn"
+                      onClick={() => setSeahubFilter("unsynced")}
+                      style={{ ...ui.segmentBtn, ...(seahubFilter === "unsynced" ? ui.segmentBtnActive : null) }}
+                    >
+                      Not synced
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <div style={ui.mobileRow}>
+                <button onClick={signOut} className="btn" style={{ ...ui.btnGhost, width: "100%" }}>
+                  Sign out
+                </button>
+              </div>
+            </div>
+          ) : null}
         </div>
       </div>
 
       {/* Main */}
       <div style={ui.shell}>
-        <div style={ui.grid}>
-          {/* Left: list */}
-          <div style={ui.card}>
-            <div style={ui.cardHeader}>
-              <div style={ui.h}>Components</div>
-              <div style={ui.muted}>{filtered.length} shown</div>
-              <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 10 }}>
-                {loading ? <div style={ui.muted}>Working…</div> : null}
+        <div style={isMobile ? ui.gridMobile : ui.grid}>
+          {/* List */}
+          {showList ? (
+            <div style={ui.card}>
+              <div style={ui.cardHeader}>
+                <div style={ui.h}>Components</div>
+                <div style={ui.muted}>{filtered.length} shown</div>
+                <div style={{ marginLeft: "auto" }}>{loading ? <div style={ui.muted}>Working…</div> : null}</div>
               </div>
-            </div>
 
-            <div style={ui.list}>
-              <div style={ui.tableHead}>
-                <div style={ui.tableHeadGrid}>
-                  <div style={ui.tableHeadLabel}>Component</div>
-                  <div style={ui.tableHeadLabel}>Location</div>
-                  <div style={{ ...ui.tableHeadLabel, textAlign: "right" }}>Status</div>
+              <div style={ui.list}>
+                <div style={ui.tableHead}>
+                  <div style={ui.tableHeadGrid}>
+                    <div style={ui.tableHeadLabel}>Component</div>
+                    <div style={ui.tableHeadLabel}>Location</div>
+                    <div style={{ ...ui.tableHeadLabel, textAlign: "right" }}>Status</div>
+                  </div>
+                </div>
+
+                <div style={ui.rowsWrap}>
+                  {filtered.map((r) => (
+                    <ListRow key={r.id} r={r} active={r.id === selectedId} onClick={() => startEdit(r)} />
+                  ))}
+
+                  {!filtered.length ? (
+                    <div style={ui.emptyList}>
+                      <div style={ui.emptyTitle}>Nothing matches your filters.</div>
+                      <div style={ui.emptySub}>Try clearing search or widening filters.</div>
+                      <button
+                        onClick={() => {
+                          setQ("");
+                          setVesselId("all");
+                          setSystemId("all");
+                          setDepartmentId("all");
+                          setStatus("all");
+                          setCriticalOnly(false);
+                          setSeahubFilter("all");
+                        }}
+                        style={ui.btnGhost}
+                      >
+                        Reset filters
+                      </button>
+                    </div>
+                  ) : null}
                 </div>
               </div>
+            </div>
+          ) : null}
 
-              <div style={ui.rowsWrap}>
-                {filtered.map((r) => (
-                  <ListRow key={r.id} r={r} active={r.id === selectedId} onClick={() => startEdit(r)} />
-                ))}
+          {/* Editor */}
+          {showEditor ? (
+            <div style={ui.card}>
+              <div style={ui.editorTop}>
+                <div style={{ display: "flex", flexDirection: "column", gap: 6, minWidth: 0 }}>
+                  <div style={ui.editorTitleLine}>
+                    <div style={ui.editorTitle} title={form.name || (isEditing ? "Edit Component" : "New Component")}>
+                      {form.name?.trim()
+                        ? truncate(form.name.trim(), isMobile ? 28 : 44)
+                        : isEditing
+                        ? "Edit Component"
+                        : "New Component"}
+                    </div>
 
-                {!filtered.length ? (
-                  <div style={ui.emptyList}>
-                    <div style={ui.emptyTitle}>Nothing matches your filters.</div>
-                    <div style={ui.emptySub}>Try clearing search or widening filters.</div>
+                    <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                      <Pill tone={form.status === "out" ? "danger" : form.status === "spare" ? "muted" : "brand"}>
+                        {form.status}
+                      </Pill>
+                      {form.critical ? <Pill tone="danger">Critical</Pill> : null}
+                      {form.seahub_synced ? <Pill tone="success">SeaHub</Pill> : null}
+                    </div>
+                  </div>
+
+                  <div style={ui.editorMeta}>
+                    {isEditing ? (
+                      <>
+                        <span style={ui.metaKey}>ID</span> <span style={ui.metaVal}>{form.id}</span>
+                        {selectedRow?.seahub_ref ? (
+                          <>
+                            <span style={ui.sep}>•</span>
+                            <span style={ui.metaKey}>SeaHub Ref</span> <span style={ui.metaVal}>{selectedRow.seahub_ref}</span>
+                          </>
+                        ) : null}
+                      </>
+                    ) : (
+                      <span style={ui.mutedSmall}>Create a component, then add photos and references.</span>
+                    )}
+                  </div>
+                </div>
+
+                <div style={{ marginLeft: "auto", display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+                  {isMobile ? (
                     <button
-                      onClick={() => {
-                        setQ("");
-                        setVesselId("all");
-                        setSystemId("all");
-                        setDepartmentId("all");
-                        setStatus("all");
-                        setCriticalOnly(false);
-                        setSeahubFilter("all");
-                      }}
+                      onClick={() => setMobileTab("list")}
+                      className="btn"
                       style={ui.btnGhost}
+                      title="Back to list"
                     >
-                      Reset filters
+                      ← List
                     </button>
-                  </div>
-                ) : null}
-              </div>
-            </div>
-          </div>
+                  ) : null}
 
-          {/* Right: editor */}
-          <div style={ui.card}>
-            <div style={ui.editorTop}>
-              <div style={{ display: "flex", flexDirection: "column", gap: 6, minWidth: 0 }}>
-                <div style={ui.editorTitleLine}>
-                  <div style={ui.editorTitle} title={form.name || (isEditing ? "Edit Component" : "New Component")}>
-                    {form.name?.trim()
-                      ? truncate(form.name.trim(), 44)
-                      : isEditing
-                      ? "Edit Component"
-                      : "New Component"}
-                  </div>
-
-                  <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                    <Pill tone={form.status === "out" ? "danger" : form.status === "spare" ? "muted" : "brand"}>
-                      {form.status}
-                    </Pill>
-                    {form.critical ? <Pill tone="danger">Critical</Pill> : null}
-                    {form.seahub_synced ? <Pill tone="success">SeaHub</Pill> : null}
-                  </div>
-                </div>
-
-                <div style={ui.editorMeta}>
                   {isEditing ? (
-                    <>
-                      <span style={ui.metaKey}>ID</span> <span style={ui.metaVal}>{form.id}</span>
-                      {selectedRow?.seahub_ref ? (
-                        <>
-                          <span style={ui.sep}>•</span>
-                          <span style={ui.metaKey}>SeaHub Ref</span> <span style={ui.metaVal}>{selectedRow.seahub_ref}</span>
-                        </>
-                      ) : null}
-                    </>
-                  ) : (
-                    <span style={ui.mutedSmall}>Create a component, then add photos and references.</span>
-                  )}
-                </div>
-              </div>
+                    <button onClick={() => deleteComponent(form.id)} className="btn" style={ui.btnDanger}>
+                      Delete
+                    </button>
+                  ) : null}
 
-              <div style={{ marginLeft: "auto", display: "flex", gap: 10, alignItems: "center" }}>
-                {isEditing ? (
-                  <button onClick={() => deleteComponent(form.id)} className="btn" style={ui.btnDanger}>
-                    Delete
+                  <button onClick={saveComponent} className="btn" style={ui.btnPrimary}>
+                    {isEditing ? "Save" : "Create"}
                   </button>
-                ) : null}
-                <button onClick={saveComponent} className="btn" style={ui.btnPrimary}>
-                  {isEditing ? "Save" : "Create"}
-                </button>
+                </div>
               </div>
-            </div>
 
-            <div style={ui.cardPad}>
-              <Section title="Identity">
-                <div style={ui.formGrid}>
-                  <Field label="Component name" hint="Required">
-                    <input
-                      className="field"
-                      value={form.name}
-                      onChange={(e) => setForm((p) => ({ ...p, name: e.target.value }))}
-                      placeholder="e.g. Chiller seawater pump"
-                      style={ui.field}
-                    />
-                  </Field>
-
-                  <Field label="Status">
-                    <select
-                      className="field"
-                      value={form.status}
-                      onChange={(e) => setForm((p) => ({ ...p, status: e.target.value }))}
-                      style={ui.field}
-                    >
-                      {statuses.map((s) => (
-                        <option key={s} value={s}>
-                          {s}
-                        </option>
-                      ))}
-                    </select>
-                  </Field>
-
-                  <Field label="Make">
-                    <input
-                      className="field"
-                      value={form.make}
-                      onChange={(e) => setForm((p) => ({ ...p, make: e.target.value }))}
-                      placeholder="e.g. Jabsco"
-                      style={ui.field}
-                    />
-                  </Field>
-
-                  <Field label="Model">
-                    <input
-                      className="field"
-                      value={form.model}
-                      onChange={(e) => setForm((p) => ({ ...p, model: e.target.value }))}
-                      placeholder="e.g. 31640-0092"
-                      style={ui.field}
-                    />
-                  </Field>
-
-                  <Field label="Serial number">
-                    <input
-                      className="field"
-                      value={form.serial_number}
-                      onChange={(e) => setForm((p) => ({ ...p, serial_number: e.target.value }))}
-                      placeholder="Optional"
-                      style={ui.field}
-                    />
-                  </Field>
-
-                  <Field label="Location">
-                    <input
-                      className="field"
-                      value={form.location}
-                      onChange={(e) => setForm((p) => ({ ...p, location: e.target.value }))}
-                      placeholder="e.g. ER port side"
-                      style={ui.field}
-                    />
-                  </Field>
-                </div>
-              </Section>
-
-              <Section title="Placement">
-                <div style={ui.formGrid}>
-                  <Field label="Vessel">
-                    <select
-                      className="field"
-                      value={form.vessel_id}
-                      onChange={(e) => setForm((p) => ({ ...p, vessel_id: e.target.value }))}
-                      style={ui.field}
-                    >
-                      <option value="">Optional</option>
-                      {vessels.map((v) => (
-                        <option key={v.id} value={v.id}>
-                          {v.name}
-                        </option>
-                      ))}
-                    </select>
-                  </Field>
-
-                  <Field label="System">
-                    <select
-                      className="field"
-                      value={form.system_id}
-                      onChange={(e) => setForm((p) => ({ ...p, system_id: e.target.value }))}
-                      style={ui.field}
-                    >
-                      <option value="">Optional</option>
-                      {systems.map((s) => (
-                        <option key={s.id} value={s.id}>
-                          {s.name}
-                        </option>
-                      ))}
-                    </select>
-                  </Field>
-
-                  <Field label="Department">
-                    <select
-                      className="field"
-                      value={form.department_id}
-                      onChange={(e) => setForm((p) => ({ ...p, department_id: e.target.value }))}
-                      style={ui.field}
-                    >
-                      <option value="">Optional</option>
-                      {departments.map((d) => (
-                        <option key={d.id} value={d.id}>
-                          {d.name}
-                        </option>
-                      ))}
-                    </select>
-                  </Field>
-
-                  <Field label="Supplier">
-                    <input
-                      className="field"
-                      value={form.supplier}
-                      onChange={(e) => setForm((p) => ({ ...p, supplier: e.target.value }))}
-                      placeholder="Optional"
-                      style={ui.field}
-                    />
-                  </Field>
-
-                  <Field label="Installed date">
-                    <input
-                      className="field"
-                      type="date"
-                      value={form.installed_at}
-                      onChange={(e) => setForm((p) => ({ ...p, installed_at: e.target.value }))}
-                      style={ui.field}
-                    />
-                  </Field>
-
-                  <Field label="Manual URL" hint="Paste link when available" span={2}>
-                    <input
-                      className="field"
-                      value={form.manual_url}
-                      onChange={(e) => setForm((p) => ({ ...p, manual_url: e.target.value }))}
-                      placeholder="https://…"
-                      style={ui.field}
-                    />
-                  </Field>
-                </div>
-              </Section>
-
-              <Section
-                title="Tags & Notes"
-                right={
-                  tagsPreview.length ? (
-                    <div style={{ display: "flex", gap: 6, flexWrap: "wrap", justifyContent: "flex-end" }}>
-                      {tagsPreview.slice(0, 5).map((t) => (
-                        <Chip key={t} text={t} />
-                      ))}
-                      {tagsPreview.length > 5 ? <span style={ui.moreTag}>+{tagsPreview.length - 5}</span> : null}
-                    </div>
-                  ) : (
-                    <span style={ui.mutedSmall}>No tags yet</span>
-                  )
-                }
-              >
-                <div style={ui.formGrid}>
-                  <Field label="Tags" hint="Comma separated" span={2}>
-                    <input
-                      className="field"
-                      value={form.tagsText}
-                      onChange={(e) => setForm((p) => ({ ...p, tagsText: e.target.value }))}
-                      placeholder="e.g. HVAC, critical-path, spares"
-                      style={ui.field}
-                    />
-                  </Field>
-
-                  <Field label="Notes" span={2}>
-                    <textarea
-                      className="field"
-                      value={form.notes}
-                      onChange={(e) => setForm((p) => ({ ...p, notes: e.target.value }))}
-                      placeholder="Add service notes, observations, part numbers, etc."
-                      style={{ ...ui.field, minHeight: 110, resize: "vertical", lineHeight: 1.45 }}
-                    />
-                  </Field>
-                </div>
-              </Section>
-
-              <Section title="SeaHub">
-                <div style={ui.seahubRow}>
-                  <label style={ui.toggleLarge}>
-                    <input
-                      type="checkbox"
-                      checked={form.seahub_synced}
-                      onChange={(e) => setForm((p) => ({ ...p, seahub_synced: e.target.checked }))}
-                    />
-                    <div style={{ display: "flex", flexDirection: "column" }}>
-                      <span style={{ fontWeight: 850 }}>Synced to SeaHub</span>
-                      <span style={ui.mutedSmall}>Use this to flag items already mirrored in SeaHub.</span>
-                    </div>
-                  </label>
-
-                  <div style={{ flex: 1, minWidth: 240 }}>
-                    <Field label="SeaHub reference" hint="Optional">
+              <div style={ui.cardPad}>
+                <Section title="Identity">
+                  <div style={isMobile ? ui.formGridMobile : ui.formGrid}>
+                    <Field label="Component name" hint="Required">
                       <input
                         className="field"
-                        value={form.seahub_ref}
-                        onChange={(e) => setForm((p) => ({ ...p, seahub_ref: e.target.value }))}
-                        placeholder="e.g. SH-INV-01923"
+                        value={form.name}
+                        onChange={(e) => setForm((p) => ({ ...p, name: e.target.value }))}
+                        placeholder="e.g. Chiller seawater pump"
+                        style={ui.field}
+                      />
+                    </Field>
+
+                    <Field label="Status">
+                      <select
+                        className="field"
+                        value={form.status}
+                        onChange={(e) => setForm((p) => ({ ...p, status: e.target.value }))}
+                        style={ui.field}
+                      >
+                        {statuses.map((s) => (
+                          <option key={s} value={s}>
+                            {s}
+                          </option>
+                        ))}
+                      </select>
+                    </Field>
+
+                    <Field label="Make">
+                      <input
+                        className="field"
+                        value={form.make}
+                        onChange={(e) => setForm((p) => ({ ...p, make: e.target.value }))}
+                        placeholder="e.g. Jabsco"
+                        style={ui.field}
+                      />
+                    </Field>
+
+                    <Field label="Model">
+                      <input
+                        className="field"
+                        value={form.model}
+                        onChange={(e) => setForm((p) => ({ ...p, model: e.target.value }))}
+                        placeholder="e.g. 31640-0092"
+                        style={ui.field}
+                      />
+                    </Field>
+
+                    <Field label="Serial number">
+                      <input
+                        className="field"
+                        value={form.serial_number}
+                        onChange={(e) => setForm((p) => ({ ...p, serial_number: e.target.value }))}
+                        placeholder="Optional"
+                        style={ui.field}
+                      />
+                    </Field>
+
+                    <Field label="Location">
+                      <input
+                        className="field"
+                        value={form.location}
+                        onChange={(e) => setForm((p) => ({ ...p, location: e.target.value }))}
+                        placeholder="e.g. ER port side"
                         style={ui.field}
                       />
                     </Field>
                   </div>
-                </div>
-              </Section>
+                </Section>
 
-              <Section
-                title="Photos"
-                right={
-                  <button
-                    onClick={() => fileInputRef.current?.click()}
-                    className="btn"
-                    style={ui.btnGhost}
-                    disabled={!selectedId && !form.id}
-                    title={!selectedId && !form.id ? "Save first to enable uploads" : "Upload photo"}
-                  >
-                    Upload photo
-                  </button>
-                }
-              >
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  accept="image/*"
-                  capture="environment"
-                  style={{ display: "none" }}
-                  onChange={(e) => {
-                    const f = e.target.files?.[0];
-                    if (f) uploadPhoto(f);
-                    e.currentTarget.value = "";
-                  }}
-                />
+                <Section title="Placement">
+                  <div style={isMobile ? ui.formGridMobile : ui.formGrid}>
+                    <Field label="Vessel">
+                      <select
+                        className="field"
+                        value={form.vessel_id}
+                        onChange={(e) => setForm((p) => ({ ...p, vessel_id: e.target.value }))}
+                        style={ui.field}
+                      >
+                        <option value="">Optional</option>
+                        {vessels.map((v) => (
+                          <option key={v.id} value={v.id}>
+                            {v.name}
+                          </option>
+                        ))}
+                      </select>
+                    </Field>
 
-                {!selectedId && !form.id ? (
-                  <div style={ui.photoEmpty}>
-                    <div style={ui.emptyTitle}>Save the component to enable photo uploads.</div>
-                    <div style={ui.emptySub}>Once created, you can attach photos for quick identification.</div>
+                    <Field label="System">
+                      <select
+                        className="field"
+                        value={form.system_id}
+                        onChange={(e) => setForm((p) => ({ ...p, system_id: e.target.value }))}
+                        style={ui.field}
+                      >
+                        <option value="">Optional</option>
+                        {systems.map((s) => (
+                          <option key={s.id} value={s.id}>
+                            {s.name}
+                          </option>
+                        ))}
+                      </select>
+                    </Field>
+
+                    <Field label="Department">
+                      <select
+                        className="field"
+                        value={form.department_id}
+                        onChange={(e) => setForm((p) => ({ ...p, department_id: e.target.value }))}
+                        style={ui.field}
+                      >
+                        <option value="">Optional</option>
+                        {departments.map((d) => (
+                          <option key={d.id} value={d.id}>
+                            {d.name}
+                          </option>
+                        ))}
+                      </select>
+                    </Field>
+
+                    <Field label="Supplier">
+                      <input
+                        className="field"
+                        value={form.supplier}
+                        onChange={(e) => setForm((p) => ({ ...p, supplier: e.target.value }))}
+                        placeholder="Optional"
+                        style={ui.field}
+                      />
+                    </Field>
+
+                    <Field label="Installed date">
+                      <input
+                        className="field"
+                        type="date"
+                        value={form.installed_at}
+                        onChange={(e) => setForm((p) => ({ ...p, installed_at: e.target.value }))}
+                        style={ui.field}
+                      />
+                    </Field>
+
+                    <Field label="Manual URL" hint="Paste link when available" span={2}>
+                      <input
+                        className="field"
+                        value={form.manual_url}
+                        onChange={(e) => setForm((p) => ({ ...p, manual_url: e.target.value }))}
+                        placeholder="https://…"
+                        style={ui.field}
+                      />
+                    </Field>
                   </div>
-                ) : photos.length === 0 ? (
-                  <div style={ui.photoEmpty}>
-                    <div style={ui.emptyTitle}>No photos yet.</div>
-                    <div style={ui.emptySub}>Add a clear ID shot first — it becomes the cover image.</div>
-                  </div>
-                ) : (
-                  <div style={ui.photoLayout}>
-                    <a
-                      href={coverUrl}
-                      target="_blank"
-                      rel="noreferrer"
-                      style={{ textDecoration: "none", display: "block" }}
-                      title="Open cover photo"
-                    >
-                      <div style={ui.coverCard} className="photoHover">
-                        {coverUrl ? (
-                          <img src={coverUrl} alt="Cover" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-                        ) : (
-                          <div style={ui.photoLoading}>Loading…</div>
-                        )}
-                        <div style={ui.coverOverlay}>
-                          <div style={ui.coverTitle}>Cover</div>
-                          <div style={ui.coverSub}>{photos.length} photos</div>
-                        </div>
+                </Section>
+
+                <Section
+                  title="Tags & Notes"
+                  right={
+                    tagsPreview.length ? (
+                      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", justifyContent: "flex-end" }}>
+                        {tagsPreview.slice(0, 5).map((t) => (
+                          <Chip key={t} text={t} />
+                        ))}
+                        {tagsPreview.length > 5 ? <span style={ui.moreTag}>+{tagsPreview.length - 5}</span> : null}
                       </div>
-                    </a>
+                    ) : (
+                      <span style={ui.mutedSmall}>No tags yet</span>
+                    )
+                  }
+                >
+                  <div style={isMobile ? ui.formGridMobile : ui.formGrid}>
+                    <Field label="Tags" hint="Comma separated" span={2}>
+                      <input
+                        className="field"
+                        value={form.tagsText}
+                        onChange={(e) => setForm((p) => ({ ...p, tagsText: e.target.value }))}
+                        placeholder="e.g. HVAC, critical-path, spares"
+                        style={ui.field}
+                      />
+                    </Field>
 
-                    <div style={ui.photoGrid}>
-                      {photos.slice(1).map((p) => (
-                        <a
-                          key={p.id}
-                          href={photoUrls[p.id]}
-                          target="_blank"
-                          rel="noreferrer"
-                          style={{ textDecoration: "none" }}
-                          title="Open photo"
-                        >
-                          <div style={ui.photoCard} className="photoHover">
-                            {photoUrls[p.id] ? (
-                              <img
-                                src={photoUrls[p.id]}
-                                alt={p.caption ?? "Component photo"}
-                                style={{ width: "100%", height: "100%", objectFit: "cover" }}
-                              />
-                            ) : (
-                              <div style={ui.photoLoading}>Loading…</div>
-                            )}
-                          </div>
-                        </a>
-                      ))}
+                    <Field label="Notes" span={2}>
+                      <textarea
+                        className="field"
+                        value={form.notes}
+                        onChange={(e) => setForm((p) => ({ ...p, notes: e.target.value }))}
+                        placeholder="Add service notes, observations, part numbers, etc."
+                        style={{ ...ui.field, minHeight: 110, resize: "vertical", lineHeight: 1.45 }}
+                      />
+                    </Field>
+                  </div>
+                </Section>
+
+                <Section title="SeaHub">
+                  <div style={ui.seahubRow}>
+                    <label style={ui.toggleLarge}>
+                      <input
+                        type="checkbox"
+                        checked={form.seahub_synced}
+                        onChange={(e) => setForm((p) => ({ ...p, seahub_synced: e.target.checked }))}
+                      />
+                      <div style={{ display: "flex", flexDirection: "column" }}>
+                        <span style={{ fontWeight: 850 }}>Synced to SeaHub</span>
+                        <span style={ui.mutedSmall}>Use this to flag items already mirrored in SeaHub.</span>
+                      </div>
+                    </label>
+
+                    <div style={{ flex: 1, minWidth: 240 }}>
+                      <Field label="SeaHub reference" hint="Optional">
+                        <input
+                          className="field"
+                          value={form.seahub_ref}
+                          onChange={(e) => setForm((p) => ({ ...p, seahub_ref: e.target.value }))}
+                          placeholder="e.g. SH-INV-01923"
+                          style={ui.field}
+                        />
+                      </Field>
                     </div>
                   </div>
-                )}
-              </Section>
+                </Section>
+
+                <Section
+                  title="Photos"
+                  right={
+                    <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                      <button
+                        onClick={() => {
+                          if (!selectedId && !form.id) return;
+                          if (fileInputRef.current) {
+                            fileInputRef.current.setAttribute("capture", "environment");
+                            fileInputRef.current.click();
+                          }
+                        }}
+                        className="btn"
+                        style={ui.btnPrimary}
+                        disabled={!selectedId && !form.id}
+                        title={!selectedId && !form.id ? "Save first to enable uploads" : "Take photo"}
+                      >
+                        Take photo
+                      </button>
+
+                      <button
+                        onClick={() => {
+                          if (!selectedId && !form.id) return;
+                          if (fileInputRef.current) {
+                            fileInputRef.current.removeAttribute("capture");
+                            fileInputRef.current.click();
+                          }
+                        }}
+                        className="btn"
+                        style={ui.btnGhost}
+                        disabled={!selectedId && !form.id}
+                        title={!selectedId && !form.id ? "Save first to enable uploads" : "Choose from library"}
+                      >
+                        Library
+                      </button>
+                    </div>
+                  }
+                >
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept="image/jpeg,image/png,image/heic"
+                    capture="environment"
+                    style={{ display: "none" }}
+                    onChange={(e) => {
+                      const f = e.target.files?.[0];
+                      if (f) uploadPhoto(f);
+                      e.currentTarget.value = "";
+                    }}
+                  />
+
+                  {!selectedId && !form.id ? (
+                    <div style={ui.photoEmpty}>
+                      <div style={ui.emptyTitle}>Save the component to enable photo uploads.</div>
+                      <div style={ui.emptySub}>Once created, you can attach photos for quick identification.</div>
+                    </div>
+                  ) : photos.length === 0 ? (
+                    <div style={ui.photoEmpty}>
+                      <div style={ui.emptyTitle}>No photos yet.</div>
+                      <div style={ui.emptySub}>Add a clear ID shot first — it becomes the cover image.</div>
+                    </div>
+                  ) : (
+                    <div style={isMobile ? ui.photoLayoutMobile : ui.photoLayout}>
+                      <a
+                        href={coverUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        style={{ textDecoration: "none", display: "block" }}
+                        title="Open cover photo"
+                      >
+                        <div style={ui.coverCard} className="photoHover">
+                          {coverUrl ? (
+                            <img src={coverUrl} alt="Cover" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                          ) : (
+                            <div style={ui.photoLoading}>Loading…</div>
+                          )}
+                          <div style={ui.coverOverlay}>
+                            <div style={ui.coverTitle}>Cover</div>
+                            <div style={ui.coverSub}>{photos.length} photos</div>
+                          </div>
+                        </div>
+                      </a>
+
+                      <div style={ui.photoGridMobile}>
+                        {photos.slice(1).map((p) => (
+                          <a
+                            key={p.id}
+                            href={photoUrls[p.id]}
+                            target="_blank"
+                            rel="noreferrer"
+                            style={{ textDecoration: "none" }}
+                            title="Open photo"
+                          >
+                            <div style={ui.photoCard} className="photoHover">
+                              {photoUrls[p.id] ? (
+                                <img
+                                  src={photoUrls[p.id]}
+                                  alt={p.caption ?? "Component photo"}
+                                  style={{ width: "100%", height: "100%", objectFit: "cover" }}
+                                />
+                              ) : (
+                                <div style={ui.photoLoading}>Loading…</div>
+                              )}
+                            </div>
+                          </a>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </Section>
+              </div>
             </div>
-          </div>
+          ) : null}
         </div>
       </div>
     </div>
@@ -1234,12 +1414,13 @@ const ui = {
 
   titleRow: { display: "flex", alignItems: "baseline", gap: 10 } as React.CSSProperties,
   title: { fontWeight: 950, fontSize: 16, letterSpacing: "-0.02em" } as React.CSSProperties,
-  subtitle: { fontSize: 12, opacity: 0.66, display: "flex", alignItems: "center", gap: 8 } as React.CSSProperties,
+  subtitle: { fontSize: 12, opacity: 0.66, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" } as React.CSSProperties,
   sep: { opacity: 0.35 } as React.CSSProperties,
   dot: { width: 8, height: 8, borderRadius: 999, background: "rgba(2,6,23,0.25)", display: "inline-block" } as React.CSSProperties,
 
   shell: { maxWidth: 1320, margin: "0 auto", padding: 16 } as React.CSSProperties,
   grid: { display: "grid", gridTemplateColumns: "1.1fr 0.9fr", gap: 16 } as React.CSSProperties,
+  gridMobile: { display: "grid", gridTemplateColumns: "1fr", gap: 16 } as React.CSSProperties,
 
   card: {
     borderRadius: 18,
@@ -1268,6 +1449,21 @@ const ui = {
   iconBtn: {
     position: "absolute",
     right: 8,
+    border: "1px solid rgba(2,6,23,0.10)",
+    background: "rgba(255,255,255,0.85)",
+    borderRadius: 10,
+    height: 28,
+    width: 28,
+    cursor: "pointer",
+    opacity: 0.7,
+  } as React.CSSProperties,
+
+  searchWrapMobile: { position: "relative", width: "100%" } as React.CSSProperties,
+  iconBtnMobile: {
+    position: "absolute",
+    right: 8,
+    top: "50%",
+    transform: "translateY(-50%)",
     border: "1px solid rgba(2,6,23,0.10)",
     background: "rgba(255,255,255,0.85)",
     borderRadius: 10,
@@ -1326,7 +1522,6 @@ const ui = {
     userSelect: "none",
   } as React.CSSProperties,
 
-  // ✅ Segmented SeaHub filter styles
   segment: {
     display: "flex",
     borderRadius: 12,
@@ -1435,7 +1630,7 @@ const ui = {
     gap: 12,
     alignItems: "center",
   } as React.CSSProperties,
-  rowNameLine: { display: "flex", gap: 8, alignItems: "center", minWidth: 0 } as React.CSSProperties,
+  rowNameLine: { display: "flex", gap: 8, alignItems: "center", minWidth: 0, flexWrap: "wrap" } as React.CSSProperties,
   rowName: {
     fontWeight: 950,
     letterSpacing: "-0.01em",
@@ -1461,6 +1656,7 @@ const ui = {
       "radial-gradient(900px 240px at 10% 0%, rgba(2,6,23,0.06), transparent 55%)," +
       "linear-gradient(180deg, rgba(255,255,255,0.96) 0%, rgba(255,255,255,0.78) 100%)",
     backdropFilter: "blur(10px)",
+    flexWrap: "wrap",
   } as React.CSSProperties,
   editorTitleLine: { display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" } as React.CSSProperties,
   editorTitle: { fontWeight: 980, fontSize: 16, letterSpacing: "-0.02em", minWidth: 0 } as React.CSSProperties,
@@ -1485,6 +1681,8 @@ const ui = {
   sectionBody: { padding: 12 } as React.CSSProperties,
 
   formGrid: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 } as React.CSSProperties,
+  formGridMobile: { display: "grid", gridTemplateColumns: "1fr", gap: 12 } as React.CSSProperties,
+
   fieldWrap: { display: "flex", flexDirection: "column", gap: 6 } as React.CSSProperties,
   labelRow: { display: "flex", alignItems: "baseline", gap: 8 } as React.CSSProperties,
   label: { fontSize: 12, fontWeight: 900, opacity: 0.72 } as React.CSSProperties,
@@ -1493,6 +1691,8 @@ const ui = {
   seahubRow: { display: "flex", gap: 12, flexWrap: "wrap", alignItems: "stretch" } as React.CSSProperties,
 
   photoLayout: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 } as React.CSSProperties,
+  photoLayoutMobile: { display: "grid", gridTemplateColumns: "1fr", gap: 12 } as React.CSSProperties,
+
   coverCard: {
     position: "relative",
     borderRadius: 16,
@@ -1518,7 +1718,7 @@ const ui = {
   coverTitle: { fontWeight: 950, letterSpacing: "-0.01em" } as React.CSSProperties,
   coverSub: { fontSize: 12, opacity: 0.85 } as React.CSSProperties,
 
-  photoGrid: { display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 12 } as React.CSSProperties,
+  photoGridMobile: { display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 10 } as React.CSSProperties,
   photoCard: {
     borderRadius: 16,
     overflow: "hidden",
@@ -1537,6 +1737,10 @@ const ui = {
     flexDirection: "column",
     gap: 8,
   } as React.CSSProperties,
+
+  // Mobile filter layout
+  mobileFilters: { width: "100%", display: "flex", flexDirection: "column", gap: 10 } as React.CSSProperties,
+  mobileRow: { display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" } as React.CSSProperties,
 };
 
 const css = `
