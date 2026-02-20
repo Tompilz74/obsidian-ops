@@ -100,7 +100,13 @@ function Pill({
       : ui.pillNeutral;
 
   return (
-    <span style={{ ...ui.pill, ...toneStyle, ...(uppercase ? { letterSpacing: "0.14em" } : null) }}>
+    <span
+      style={{
+        ...ui.pill,
+        ...toneStyle,
+        ...(uppercase ? { letterSpacing: "0.14em" } : null),
+      }}
+    >
       {uppercase ? String(children).toUpperCase() : children}
     </span>
   );
@@ -153,6 +159,7 @@ function Section({
 }
 
 type ToastKind = "success" | "error" | "info";
+
 function Toast({
   kind,
   title,
@@ -164,8 +171,7 @@ function Toast({
   message: string;
   onClose: () => void;
 }) {
-  const tone =
-    kind === "success" ? ui.toastSuccess : kind === "error" ? ui.toastError : ui.toastInfo;
+  const tone = kind === "success" ? ui.toastSuccess : kind === "error" ? ui.toastError : ui.toastInfo;
 
   return (
     <div style={{ ...ui.toast, ...tone }}>
@@ -250,6 +256,7 @@ function ListRow({
 export default function Inventory() {
   const isMobile = useMediaQuery("(max-width: 980px)");
   const [mobileTab, setMobileTab] = useState<"list" | "editor">("list");
+  const isMobileEditor = isMobile && mobileTab === "editor";
 
   const [vessels, setVessels] = useState<Option[]>([]);
   const [systems, setSystems] = useState<Option[]>([]);
@@ -309,6 +316,11 @@ export default function Inventory() {
   const isEditing = Boolean(form.id);
 
   const selectedRow = useMemo(() => rows.find((r) => r.id === selectedId) ?? null, [rows, selectedId]);
+
+  // ✅ UX: when you switch tabs on phone, jump to top so you don’t think UI “didn’t change”
+  useEffect(() => {
+    if (isMobile) window.scrollTo({ top: 0, behavior: "instant" as any });
+  }, [isMobile, mobileTab]);
 
   async function ensureVesselExists(name: string) {
     const chk = await supabase.from("vessels").select("id,name").eq("name", name).maybeSingle();
@@ -631,7 +643,7 @@ export default function Inventory() {
       </div>
 
       {/* Top Bar */}
-      <div style={ui.topbar}>
+      <div style={{ ...ui.topbar, ...(isMobileEditor ? ui.topbarCompact : null) }}>
         <div style={ui.topbarInner}>
           <div style={ui.brand}>
             <div style={ui.titleRow}>
@@ -641,43 +653,60 @@ export default function Inventory() {
               </Pill>
             </div>
 
-            <div style={ui.subtitle}>
-              <span style={ui.dot} /> {total} total
-              <span style={ui.sep}>•</span>
-              {totalCrit} critical
-              <span style={ui.sep}>•</span>
-              {totalSea} SeaHub
-              <span style={ui.sep}>•</span>
-              {totalUnsynced} not synced
-            </div>
+            {/* ✅ IMPORTANT: on mobile editor, hide the counts line entirely */}
+            {!isMobileEditor ? (
+              <div style={ui.subtitle}>
+                <span style={ui.dot} /> {total} total
+                <span style={ui.sep}>•</span>
+                {totalCrit} critical
+                <span style={ui.sep}>•</span>
+                {totalSea} SeaHub
+                <span style={ui.sep}>•</span>
+                {totalUnsynced} not synced
+              </div>
+            ) : null}
           </div>
 
-          {/* Mobile: List/Editor tabs */}
+          {/* ✅ Mobile header controls:
+              - LIST: show segment + Add
+              - EDITOR: show Back + Add (no segment, no filters, no search)
+          */}
           {isMobile ? (
-            <div style={{ display: "flex", gap: 10, alignItems: "center", marginLeft: "auto" }}>
-              <div style={ui.segment} title="Switch view">
-                <button
-                  type="button"
-                  className="btn"
-                  onClick={() => setMobileTab("list")}
-                  style={{ ...ui.segmentBtn, ...(mobileTab === "list" ? ui.segmentBtnActive : null) }}
-                >
-                  List
+            isMobileEditor ? (
+              <div style={{ display: "flex", gap: 10, alignItems: "center", marginLeft: "auto" }}>
+                <button onClick={() => setMobileTab("list")} className="btn" style={ui.btnGhost}>
+                  ← List
                 </button>
-                <button
-                  type="button"
-                  className="btn"
-                  onClick={() => setMobileTab("editor")}
-                  style={{ ...ui.segmentBtn, ...(mobileTab === "editor" ? ui.segmentBtnActive : null) }}
-                >
-                  Editor
+                <button onClick={startAdd} className="btn" style={ui.btnPrimary}>
+                  + Add
                 </button>
               </div>
+            ) : (
+              <div style={{ display: "flex", gap: 10, alignItems: "center", marginLeft: "auto" }}>
+                <div style={ui.segment} title="Switch view">
+                  <button
+                    type="button"
+                    className="btn"
+                    onClick={() => setMobileTab("list")}
+                    style={{ ...ui.segmentBtn, ...(mobileTab === "list" ? ui.segmentBtnActive : null) }}
+                  >
+                    List
+                  </button>
+                  <button
+                    type="button"
+                    className="btn"
+                    onClick={() => setMobileTab("editor")}
+                    style={{ ...ui.segmentBtn, ...(mobileTab === "editor" ? ui.segmentBtnActive : null) }}
+                  >
+                    Editor
+                  </button>
+                </div>
 
-              <button onClick={startAdd} className="btn" style={ui.btnPrimary}>
-                + Add
-              </button>
-            </div>
+                <button onClick={startAdd} className="btn" style={ui.btnPrimary}>
+                  + Add
+                </button>
+              </div>
+            )
           ) : (
             <>
               <div style={ui.searchWrap}>
@@ -777,7 +806,7 @@ export default function Inventory() {
             </>
           )}
 
-          {/* Mobile: filters row (under title) */}
+          {/* ✅ Mobile: filters ONLY when in LIST tab (and never in editor) */}
           {isMobile && mobileTab === "list" ? (
             <div style={ui.mobileFilters}>
               <div style={ui.searchWrapMobile}>
@@ -796,7 +825,12 @@ export default function Inventory() {
               </div>
 
               <div style={ui.mobileRow}>
-                <select className="field" value={vesselId} onChange={(e) => setVesselId(e.target.value)} style={{ ...ui.field, flex: 1 }}>
+                <select
+                  className="field"
+                  value={vesselId}
+                  onChange={(e) => setVesselId(e.target.value)}
+                  style={{ ...ui.field, flex: 1 }}
+                >
                   <option value="all">All vessels</option>
                   {vessels.map((v) => (
                     <option key={v.id} value={v.id}>
@@ -805,7 +839,12 @@ export default function Inventory() {
                   ))}
                 </select>
 
-                <select className="field" value={systemId} onChange={(e) => setSystemId(e.target.value)} style={{ ...ui.field, flex: 1 }}>
+                <select
+                  className="field"
+                  value={systemId}
+                  onChange={(e) => setSystemId(e.target.value)}
+                  style={{ ...ui.field, flex: 1 }}
+                >
                   <option value="all">All systems</option>
                   {systems.map((s) => (
                     <option key={s.id} value={s.id}>
@@ -816,7 +855,12 @@ export default function Inventory() {
               </div>
 
               <div style={ui.mobileRow}>
-                <select className="field" value={departmentId} onChange={(e) => setDepartmentId(e.target.value)} style={{ ...ui.field, flex: 1 }}>
+                <select
+                  className="field"
+                  value={departmentId}
+                  onChange={(e) => setDepartmentId(e.target.value)}
+                  style={{ ...ui.field, flex: 1 }}
+                >
                   <option value="all">All depts</option>
                   {departments.map((d) => (
                     <option key={d.id} value={d.id}>
@@ -825,7 +869,12 @@ export default function Inventory() {
                   ))}
                 </select>
 
-                <select className="field" value={status} onChange={(e) => setStatus(e.target.value)} style={{ ...ui.field, flex: 1 }}>
+                <select
+                  className="field"
+                  value={status}
+                  onChange={(e) => setStatus(e.target.value)}
+                  style={{ ...ui.field, flex: 1 }}
+                >
                   <option value="all">All status</option>
                   {statuses.map((s) => (
                     <option key={s} value={s}>
@@ -962,7 +1011,8 @@ export default function Inventory() {
                         {selectedRow?.seahub_ref ? (
                           <>
                             <span style={ui.sep}>•</span>
-                            <span style={ui.metaKey}>SeaHub Ref</span> <span style={ui.metaVal}>{selectedRow.seahub_ref}</span>
+                            <span style={ui.metaKey}>SeaHub Ref</span>{" "}
+                            <span style={ui.metaVal}>{selectedRow.seahub_ref}</span>
                           </>
                         ) : null}
                       </>
@@ -973,16 +1023,11 @@ export default function Inventory() {
                 </div>
 
                 <div style={{ marginLeft: "auto", display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-                  {isMobile ? (
-                    <button
-                      onClick={() => setMobileTab("list")}
-                      className="btn"
-                      style={ui.btnGhost}
-                      title="Back to list"
-                    >
+                  {!isMobile ? null : (
+                    <button onClick={() => setMobileTab("list")} className="btn" style={ui.btnGhost} title="Back to list">
                       ← List
                     </button>
-                  ) : null}
+                  )}
 
                   {isEditing ? (
                     <button onClick={() => deleteComponent(form.id)} className="btn" style={ui.btnDanger}>
@@ -1396,6 +1441,12 @@ const ui = {
     backdropFilter: "blur(12px)",
   } as React.CSSProperties,
 
+  // ✅ compact topbar on mobile editor (less wasted space)
+  topbarCompact: {
+    paddingTop: 10,
+    paddingBottom: 10,
+  } as React.CSSProperties,
+
   topbarInner: {
     display: "flex",
     gap: 12,
@@ -1414,7 +1465,14 @@ const ui = {
 
   titleRow: { display: "flex", alignItems: "baseline", gap: 10 } as React.CSSProperties,
   title: { fontWeight: 950, fontSize: 16, letterSpacing: "-0.02em" } as React.CSSProperties,
-  subtitle: { fontSize: 12, opacity: 0.66, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" } as React.CSSProperties,
+  subtitle: {
+    fontSize: 12,
+    opacity: 0.66,
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+    flexWrap: "wrap",
+  } as React.CSSProperties,
   sep: { opacity: 0.35 } as React.CSSProperties,
   dot: { width: 8, height: 8, borderRadius: 999, background: "rgba(2,6,23,0.25)", display: "inline-block" } as React.CSSProperties,
 
@@ -1564,8 +1622,16 @@ const ui = {
   } as React.CSSProperties,
   pillNeutral: { background: "rgba(255,255,255,0.70)", color: "rgba(2,6,23,0.80)" } as React.CSSProperties,
   pillMuted: { background: "rgba(2,6,23,0.04)", color: "rgba(2,6,23,0.62)" } as React.CSSProperties,
-  pillDanger: { background: "rgba(239,68,68,0.07)", borderColor: "rgba(239,68,68,0.22)", color: "#B91C1C" } as React.CSSProperties,
-  pillSuccess: { background: "rgba(16,185,129,0.08)", borderColor: "rgba(16,185,129,0.24)", color: "#047857" } as React.CSSProperties,
+  pillDanger: {
+    background: "rgba(239,68,68,0.07)",
+    borderColor: "rgba(239,68,68,0.22)",
+    color: "#B91C1C",
+  } as React.CSSProperties,
+  pillSuccess: {
+    background: "rgba(16,185,129,0.08)",
+    borderColor: "rgba(16,185,129,0.24)",
+    color: "#047857",
+  } as React.CSSProperties,
   pillBrand: { background: "rgba(17,24,39,0.06)", borderColor: "rgba(17,24,39,0.18)", color: "#111827" } as React.CSSProperties,
 
   chip: {
