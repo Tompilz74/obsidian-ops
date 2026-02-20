@@ -778,7 +778,7 @@ export default function Inventory() {
           )}
 
           {/* Mobile: filters row (under title) */}
-          {isMobile ? (
+          {isMobile && mobileTab === "list" ? (
             <div style={ui.mobileFilters}>
               <div style={ui.searchWrapMobile}>
                 <input
