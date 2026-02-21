@@ -118,70 +118,59 @@ function getComponentDeepLink(componentId: string) {
 function printComponentQr(opts: { id: string; name: string }) {
   const link = getComponentDeepLink(opts.id);
 
-  const w = window.open("", "_blank", "noopener,noreferrer,width=520,height=720");
-  if (!w) return;
-
-  // Write HTML
-  w.document.open();
-  w.document.write(`
-    <html>
-      <head>
-        <title>Print QR</title>
-        <meta charset="utf-8" />
-        <style>
-          body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; padding: 28px; }
-          .card { border: 1px solid #ddd; border-radius: 16px; padding: 20px; text-align: center; }
-          h1 { margin: 0 0 8px; font-size: 18px; }
-          .sub { font-size: 12px; opacity: .7; margin-bottom: 16px; }
-          .link { margin-top: 14px; font-size: 10px; opacity: .75; word-break: break-all; }
-          .hint { margin-top: 14px; font-size: 12px; opacity: .75; }
-        </style>
-      </head>
-      <body>
-        <div class="card">
-          <h1>${escapeHtml(opts.name)}</h1>
-          <div class="sub">Obsidian Ops Inventory</div>
-          <div id="qr-mount"></div>
-          <div class="hint">Scan to open this item</div>
-          <div class="link">${escapeHtml(link)}</div>
-        </div>
-      </body>
-    </html>
-  `);
-  w.document.close();
-
-  // Inject QR SVG then print
-  const injectAndPrint = () => {
-    const mount = w.document.getElementById("qr-mount");
-    if (!mount) {
-      w.setTimeout(injectAndPrint, 50);
-      return;
-    }
-
-    const svg = document.getElementById("component-qr-svg") as SVGElement | null;
-    if (!svg) {
-      mount.innerHTML = "<div style='opacity:.7'>QR not available</div>";
-      w.focus();
-      w.print();
-      return;
-    }
-
+  // ✅ Clone the existing QR SVG from THIS page and embed it directly in the print HTML
+  let qrSvgHtml = "";
+  const svg = document.getElementById("component-qr-svg") as SVGElement | null;
+  if (svg) {
     const cloned = svg.cloneNode(true) as SVGElement;
     cloned.removeAttribute("id");
     cloned.setAttribute("width", "240");
     cloned.setAttribute("height", "240");
+    cloned.setAttribute("style", "display:block;margin:0 auto;");
+    qrSvgHtml = cloned.outerHTML;
+  }
 
-    mount.innerHTML = "";
-    mount.appendChild(cloned);
+  const html = `<!doctype html>
+<html>
+  <head>
+    <title>Print QR</title>
+    <meta charset="utf-8" />
+    <style>
+      body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; padding: 28px; }
+      .card { border: 1px solid #ddd; border-radius: 16px; padding: 20px; text-align: center; }
+      h1 { margin: 0 0 8px; font-size: 18px; }
+      .sub { font-size: 12px; opacity: .7; margin-bottom: 16px; }
+      .link { margin-top: 14px; font-size: 10px; opacity: .75; word-break: break-all; }
+      .hint { margin-top: 14px; font-size: 12px; opacity: .75; }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <h1>${escapeHtml(opts.name)}</h1>
+      <div class="sub">Obsidian Ops Inventory</div>
+      <div id="qr-mount">
+        ${
+          qrSvgHtml
+            ? qrSvgHtml
+            : "<div style='opacity:.7'>QR not available (try refresh and open this item again)</div>"
+        }
+      </div>
+      <div class="hint">Scan to open this item</div>
+      <div class="link">${escapeHtml(link)}</div>
+    </div>
 
-    w.setTimeout(() => {
-      w.focus();
-      w.print();
-    }, 80);
-  };
+    <script>
+      window.onload = () => setTimeout(() => { window.focus(); window.print(); }, 80);
+    </script>
+  </body>
+</html>`;
 
-  // Run when the new window finishes loading
-  w.onload = injectAndPrint;
+  const w = window.open("", "_blank", "width=520,height=720");
+  if (!w) return;
+
+  w.document.open();
+  w.document.write(html);
+  w.document.close();
 }
 
 /** --------------------- Small UI primitives --------------------- */
@@ -1793,7 +1782,13 @@ const ui = {
     flexWrap: "wrap",
   } as React.CSSProperties,
   sep: { opacity: 0.35 } as React.CSSProperties,
-  dot: { width: 8, height: 8, borderRadius: 999, background: "rgba(2,6,23,0.25)", display: "inline-block" } as React.CSSProperties,
+  dot: {
+    width: 8,
+    height: 8,
+    borderRadius: 999,
+    background: "rgba(2,6,23,0.25)",
+    display: "inline-block",
+  } as React.CSSProperties,
 
   shell: { maxWidth: 1320, margin: "0 auto", padding: 16 } as React.CSSProperties,
   grid: { display: "grid", gridTemplateColumns: "1.1fr 0.9fr", gap: 16 } as React.CSSProperties,
@@ -1941,9 +1936,21 @@ const ui = {
   } as React.CSSProperties,
   pillNeutral: { background: "rgba(255,255,255,0.70)", color: "rgba(2,6,23,0.80)" } as React.CSSProperties,
   pillMuted: { background: "rgba(2,6,23,0.04)", color: "rgba(2,6,23,0.62)" } as React.CSSProperties,
-  pillDanger: { background: "rgba(239,68,68,0.07)", borderColor: "rgba(239,68,68,0.22)", color: "#B91C1C" } as React.CSSProperties,
-  pillSuccess: { background: "rgba(16,185,129,0.08)", borderColor: "rgba(16,185,129,0.24)", color: "#047857" } as React.CSSProperties,
-  pillBrand: { background: "rgba(17,24,39,0.06)", borderColor: "rgba(17,24,39,0.18)", color: "#111827" } as React.CSSProperties,
+  pillDanger: {
+    background: "rgba(239,68,68,0.07)",
+    borderColor: "rgba(239,68,68,0.22)",
+    color: "#B91C1C",
+  } as React.CSSProperties,
+  pillSuccess: {
+    background: "rgba(16,185,129,0.08)",
+    borderColor: "rgba(16,185,129,0.24)",
+    color: "#047857",
+  } as React.CSSProperties,
+  pillBrand: {
+    background: "rgba(17,24,39,0.06)",
+    borderColor: "rgba(17,24,39,0.18)",
+    color: "#111827",
+  } as React.CSSProperties,
 
   chip: {
     fontSize: 11,
@@ -2039,7 +2046,11 @@ const ui = {
   editorTitle: { fontWeight: 980, fontSize: 16, letterSpacing: "-0.02em", minWidth: 0 } as React.CSSProperties,
   editorMeta: { fontSize: 12, opacity: 0.65, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" } as React.CSSProperties,
   metaKey: { fontWeight: 900, opacity: 0.8 } as React.CSSProperties,
-  metaVal: { fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace", fontSize: 11, opacity: 0.85 } as React.CSSProperties,
+  metaVal: {
+    fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+    fontSize: 11,
+    opacity: 0.85,
+  } as React.CSSProperties,
 
   section: {
     borderRadius: 16,
