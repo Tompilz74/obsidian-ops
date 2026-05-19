@@ -1,4 +1,4 @@
-﻿import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "../lib/supabase";
 import QRCode from "react-qr-code";
 
@@ -46,7 +46,22 @@ type PendingPhoto = {
   previewUrl: string; // local object URL
 };
 
+type PartRow = {
+  id: string;
+  name: string;
+  part_number: string;
+  quantity: number;
+  min_quantity: number;
+  supplier: string;
+  price: number;
+  currency: string;
+  lead_time: string;
+  notes: string;
+  component_ids: string[];
+};
+
 const statuses = ["active", "spare", "out"] as const;
+const partsStorageKey = "obsidian-ops.parts.v1";
 
 function fileExt(name: string) {
   const parts = name.split(".");
@@ -67,6 +82,25 @@ function makeDraftPath(draftId: string, originalName: string) {
 
 function truncate(str: string, n: number) {
   return str.length > n ? str.slice(0, n - 1) + "…" : str;
+}
+
+function newLocalId(prefix = "local") {
+  return typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `${prefix}-${Date.now()}`;
+}
+
+function readStoredParts() {
+  if (typeof window === "undefined") return [];
+  try {
+    const raw = window.localStorage.getItem(partsStorageKey);
+    return raw ? (JSON.parse(raw) as PartRow[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeStoredParts(parts: PartRow[]) {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(partsStorageKey, JSON.stringify(parts));
 }
 
 function useMediaQuery(query: string) {
@@ -343,6 +377,7 @@ function ListRow({
           <div style={ui.mutedTiny}>{r.serial_number ? `S/N ${truncate(r.serial_number, 18)}` : "No serial"}</div>
         </div>
       </div>
+
     </div>
   );
 }
@@ -352,6 +387,7 @@ function ListRow({
 export default function Inventory() {
   const isMobile = useMediaQuery("(max-width: 980px)");
   const [mobileTab, setMobileTab] = useState<"list" | "editor">("list");
+  const [appMode, setAppMode] = useState<"equipment" | "parts">("equipment");
   const isMobileEditor = isMobile && mobileTab === "editor";
 
   const [vessels, setVessels] = useState<Option[]>([]);
@@ -368,6 +404,23 @@ export default function Inventory() {
     typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : String(Date.now())
   );
   const [pendingPhotos, setPendingPhotos] = useState<PendingPhoto[]>([]);
+
+  const [parts, setParts] = useState<PartRow[]>(() => readStoredParts());
+  const [partQuery, setPartQuery] = useState("");
+  const [partLinkQuery, setPartLinkQuery] = useState("");
+  const emptyPartForm = {
+    id: "",
+    name: "",
+    part_number: "",
+    quantity: "1",
+    min_quantity: "0",
+    supplier: "",
+    price: "",
+    currency: "AUD",
+    lead_time: "",
+    notes: "",
+  };
+  const [partForm, setPartForm] = useState({ ...emptyPartForm });
 
   const [loading, setLoading] = useState(false);
 
@@ -418,6 +471,57 @@ export default function Inventory() {
   const isEditing = Boolean(form.id);
 
   const selectedRow = useMemo(() => rows.find((r) => r.id === selectedId) ?? null, [rows, selectedId]);
+  const linkedParts = useMemo(
+    () => (isEditing ? parts.filter((p) => (p.component_ids ?? []).includes(form.id)) : []),
+    [parts, isEditing, form.id]
+  );
+  const compatiblePartIds = useMemo(() => new Set(linkedParts.map((p) => p.id)), [linkedParts]);
+  const visibleParts = useMemo(() => {
+    const query = partQuery.trim().toLowerCase();
+    return parts
+      .filter((p) => {
+        if (!query) return true;
+        return [p.name, p.part_number, p.supplier, p.lead_time, p.notes]
+          .filter(Boolean)
+          .join(" ")
+          .toLowerCase()
+          .includes(query);
+      })
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }, [parts, partQuery]);
+  const partLinkRows = useMemo(() => {
+    const query = partLinkQuery.trim().toLowerCase();
+    return rows
+      .filter((r) => {
+        if (!query) return true;
+        return [r.name, r.make, r.model, r.serial_number, r.location, r.systems?.[0]?.name]
+          .filter(Boolean)
+          .join(" ")
+          .toLowerCase()
+          .includes(query);
+      })
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }, [rows, partLinkQuery]);
+  const catalogueValue = useMemo(
+    () => parts.reduce((sum, p) => sum + (Number(p.quantity) || 0) * (Number(p.price) || 0), 0),
+    [parts]
+  );
+  const catalogueLowStock = useMemo(
+    () => parts.filter((p) => (Number(p.quantity) || 0) <= (Number(p.min_quantity) || 0)).length,
+    [parts]
+  );
+  const linkedPartsValue = useMemo(
+    () => linkedParts.reduce((sum, p) => sum + (Number(p.quantity) || 0) * (Number(p.price) || 0), 0),
+    [linkedParts]
+  );
+  const lowStockParts = useMemo(
+    () => linkedParts.filter((p) => (Number(p.quantity) || 0) <= (Number(p.min_quantity) || 0)),
+    [linkedParts]
+  );
+
+  useEffect(() => {
+    writeStoredParts(parts);
+  }, [parts]);
 
   // ✅ UX: when you switch tabs on phone, jump to top
   useEffect(() => {
@@ -529,10 +633,21 @@ export default function Inventory() {
   function startAdd() {
     resetDraft();
     setForm({ ...emptyForm });
+    setPartForm({ ...emptyPartForm });
     setSelectedId(null);
     setPhotos([]);
     setPhotoUrls({});
     if (isMobile) setMobileTab("editor");
+  }
+
+  function startCaptureFirst() {
+    startAdd();
+    window.setTimeout(() => {
+      if (fileInputRef.current) {
+        fileInputRef.current.setAttribute("capture", "environment");
+        fileInputRef.current.click();
+      }
+    }, 90);
   }
 
   function startEdit(r: ComponentRow) {
@@ -558,6 +673,7 @@ export default function Inventory() {
       department_id: r.department_id ?? "",
     });
     setSelectedId(r.id);
+    setPartForm({ ...emptyPartForm });
     loadPhotos(r.id).catch(console.error);
     if (isMobile) setMobileTab("editor");
   }
@@ -688,6 +804,9 @@ export default function Inventory() {
     try {
       const res = await supabase.from("components").delete().eq("id", id);
       if (res.error) throw res.error;
+      setParts((current) =>
+        current.map((p) => ({ ...p, component_ids: (p.component_ids ?? []).filter((componentId) => componentId !== id) }))
+      );
       setForm({ ...emptyForm });
       setSelectedId(null);
       setPhotos([]);
@@ -703,6 +822,115 @@ export default function Inventory() {
     }
   }
 
+  function resetPartForm() {
+    setPartForm({ ...emptyPartForm });
+  }
+
+  function normaliseNumber(value: string) {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : 0;
+  }
+
+  function savePart() {
+    if (!partForm.name.trim()) {
+      showToast("error", "Part name is required.", "Can’t save part");
+      return;
+    }
+
+    const base = {
+      name: partForm.name.trim(),
+      part_number: partForm.part_number.trim(),
+      quantity: normaliseNumber(partForm.quantity),
+      min_quantity: normaliseNumber(partForm.min_quantity),
+      supplier: partForm.supplier.trim(),
+      price: normaliseNumber(partForm.price),
+      currency: partForm.currency.trim() || "AUD",
+      lead_time: partForm.lead_time.trim(),
+      notes: partForm.notes.trim(),
+    };
+
+    if (partForm.id) {
+      setParts((current) =>
+        current.map((p) =>
+          p.id === partForm.id
+            ? { ...p, ...base, component_ids: Array.from(new Set([...(p.component_ids ?? []), ...(isEditing && appMode === "equipment" ? [form.id] : [])])) }
+            : p
+        )
+      );
+      showToast("success", "Part updated.");
+    } else {
+      setParts((current) => [
+        ...current,
+        {
+          id: newLocalId("part"),
+          ...base,
+          component_ids: isEditing && appMode === "equipment" ? [form.id] : [],
+        },
+      ]);
+      showToast("success", isEditing && appMode === "equipment" ? "Part added and linked." : "Part added to catalogue.");
+    }
+
+    resetPartForm();
+  }
+
+  function editPart(part: PartRow) {
+    setPartForm({
+      id: part.id,
+      name: part.name,
+      part_number: part.part_number,
+      quantity: String(part.quantity ?? 0),
+      min_quantity: String(part.min_quantity ?? 0),
+      supplier: part.supplier,
+      price: part.price ? String(part.price) : "",
+      currency: part.currency || "AUD",
+      lead_time: part.lead_time,
+      notes: part.notes,
+    });
+  }
+
+  function linkPart(partId: string) {
+    if (!isEditing) return;
+    setParts((current) =>
+      current.map((p) =>
+        p.id === partId ? { ...p, component_ids: Array.from(new Set([...(p.component_ids ?? []), ...(isEditing && appMode === "equipment" ? [form.id] : [])])) } : p
+      )
+    );
+  }
+
+  function unlinkPart(partId: string) {
+    setParts((current) =>
+      current.map((p) => (p.id === partId ? { ...p, component_ids: (p.component_ids ?? []).filter((id) => id !== form.id) } : p))
+    );
+  }
+
+  function deletePart(partId: string) {
+    if (!confirm("Delete this part from the shared catalogue?")) return;
+    setParts((current) => current.filter((p) => p.id !== partId));
+    if (partForm.id === partId) resetPartForm();
+  }
+
+  function partLinkedComponents(part: PartRow) {
+    const ids = new Set(part.component_ids ?? []);
+    return rows.filter((r) => ids.has(r.id));
+  }
+
+  function togglePartComponent(partId: string, componentId: string) {
+    setParts((current) =>
+      current.map((p) => {
+        if (p.id !== partId) return p;
+        const ids = new Set(p.component_ids ?? []);
+        if (ids.has(componentId)) ids.delete(componentId);
+        else ids.add(componentId);
+        return { ...p, component_ids: Array.from(ids) };
+      })
+    );
+  }
+
+  function openPartsMode(part?: PartRow) {
+    setAppMode("parts");
+    if (part) editPart(part);
+    if (isMobile) setMobileTab("list");
+  }
   // ✅ Upload works even without a component id (draft mode)
   async function uploadPhoto(file: File) {
     const componentId = selectedId ?? form.id;
@@ -889,13 +1117,36 @@ export default function Inventory() {
             ) : null}
           </div>
 
+
+          <div style={isMobile ? ui.modeTabsMobile : ui.modeTabs} title="Switch workspace">
+            <button
+              type="button"
+              className="btn"
+              onClick={() => setAppMode("equipment")}
+              style={{ ...ui.modeTab, ...(appMode === "equipment" ? ui.modeTabActive : null) }}
+            >
+              Equipment
+            </button>
+            <button
+              type="button"
+              className="btn"
+              onClick={() => setAppMode("parts")}
+              style={{ ...ui.modeTab, ...(appMode === "parts" ? ui.modeTabActive : null) }}
+            >
+              Parts
+            </button>
+          </div>
+
           {isMobile ? (
             isMobileEditor ? (
               <div style={{ display: "flex", gap: 10, alignItems: "center", marginLeft: "auto" }}>
                 <button onClick={() => setMobileTab("list")} className="btn" style={ui.btnGhost}>
                   ← List
                 </button>
-                <button onClick={startAdd} className="btn" style={ui.btnPrimary}>
+                <button onClick={startCaptureFirst} className="btn" style={ui.btnPrimary}>
+                  Photo first
+                </button>
+                <button onClick={startAdd} className="btn" style={ui.btnGhost}>
                   + Add
                 </button>
               </div>
@@ -920,7 +1171,10 @@ export default function Inventory() {
                   </button>
                 </div>
 
-                <button onClick={startAdd} className="btn" style={ui.btnPrimary}>
+                <button onClick={startCaptureFirst} className="btn" style={ui.btnPrimary}>
+                  Photo first
+                </button>
+                <button onClick={startAdd} className="btn" style={ui.btnGhost}>
                   + Add
                 </button>
               </div>
@@ -1015,7 +1269,10 @@ export default function Inventory() {
                 </button>
               </div>
 
-              <button onClick={startAdd} className="btn" style={{ ...ui.btnPrimary, marginLeft: "auto" }}>
+              <button onClick={startCaptureFirst} className="btn" style={{ ...ui.btnPrimary, marginLeft: "auto" }}>
+                Photo first
+              </button>
+              <button onClick={startAdd} className="btn" style={ui.btnGhost}>
                 + Add
               </button>
               <button onClick={signOut} className="btn" style={ui.btnGhost}>
@@ -1149,9 +1406,127 @@ export default function Inventory() {
 
       {/* Main */}
       <div style={ui.shell}>
+        <div style={isMobile ? ui.commandStripMobile : ui.commandStrip}>
+          <button type="button" className="btn" style={ui.commandTile} onClick={() => setAppMode("equipment")}>
+            <span style={ui.commandKicker}>Fleet</span>
+            <span style={ui.commandValue}>{total}</span>
+            <span style={ui.commandLabel}>equipment</span>
+          </button>
+          <button type="button" className="btn" style={ui.commandTile} onClick={() => setAppMode("parts")}>
+            <span style={ui.commandKicker}>Stores</span>
+            <span style={ui.commandValue}>{parts.length}</span>
+            <span style={ui.commandLabel}>parts</span>
+          </button>
+          <button type="button" className="btn" style={ui.commandTile} onClick={() => setSeahubFilter("unsynced")}>
+            <span style={ui.commandKicker}>Sync</span>
+            <span style={ui.commandValue}>{totalUnsynced}</span>
+            <span style={ui.commandLabel}>pending</span>
+          </button>
+        </div>
+
         <div style={isMobile ? ui.gridMobile : ui.grid}>
+          {appMode === "parts" ? (
+            <div style={{ ...ui.card, gridColumn: "1 / -1" }}>
+              <div style={ui.partsHero}>
+                <div>
+                  <div style={ui.overline}>Parts catalogue</div>
+                  <div style={ui.partsHeroTitle}>Spares, consumables, suppliers</div>
+                  <div style={ui.partsHeroSub}>Create parts once, then link them to every piece of equipment they fit.</div>
+                </div>
+                <div style={isMobile ? { ...ui.partsHeroStats, gridTemplateColumns: "1fr" } : ui.partsHeroStats}>
+                  <div style={ui.metricTile}><div style={ui.metricValue}>{parts.length}</div><div style={ui.metricLabel}>Parts</div></div>
+                  <div style={ui.metricTile}><div style={ui.metricValue}>{catalogueLowStock}</div><div style={ui.metricLabel}>Low stock</div></div>
+                  <div style={ui.metricTile}><div style={ui.metricValue}>AUD {catalogueValue.toFixed(0)}</div><div style={ui.metricLabel}>Value</div></div>
+                </div>
+              </div>
+
+              <div style={ui.cardPad}>
+                <Section title={partForm.id ? "Edit Part" : "Add Part"} right={<span style={ui.mutedSmall}>Saved on this device</span>}>
+                  <div style={isMobile ? ui.formGridMobile : ui.formGrid}>
+                    <Field label="Part / consumable" hint="Required">
+                      <input className="field" value={partForm.name} onChange={(e) => setPartForm((p) => ({ ...p, name: e.target.value }))} placeholder="e.g. Racor 2020 filter" style={ui.field} />
+                    </Field>
+                    <Field label="Part number">
+                      <input className="field" value={partForm.part_number} onChange={(e) => setPartForm((p) => ({ ...p, part_number: e.target.value }))} placeholder="SKU / OEM / alt number" style={ui.field} />
+                    </Field>
+                    <Field label="Qty onboard">
+                      <input className="field" type="number" min="0" step="1" value={partForm.quantity} onChange={(e) => setPartForm((p) => ({ ...p, quantity: e.target.value }))} style={ui.field} />
+                    </Field>
+                    <Field label="Minimum qty">
+                      <input className="field" type="number" min="0" step="1" value={partForm.min_quantity} onChange={(e) => setPartForm((p) => ({ ...p, min_quantity: e.target.value }))} style={ui.field} />
+                    </Field>
+                    <Field label="Supplier">
+                      <input className="field" value={partForm.supplier} onChange={(e) => setPartForm((p) => ({ ...p, supplier: e.target.value }))} placeholder="e.g. Norship, RS, OEM" style={ui.field} />
+                    </Field>
+                    <Field label="Price">
+                      <div style={{ display: "grid", gridTemplateColumns: "86px 1fr", gap: 8 }}>
+                        <input className="field" value={partForm.currency} onChange={(e) => setPartForm((p) => ({ ...p, currency: e.target.value.toUpperCase() }))} placeholder="AUD" style={ui.field} />
+                        <input className="field" type="number" min="0" step="0.01" value={partForm.price} onChange={(e) => setPartForm((p) => ({ ...p, price: e.target.value }))} placeholder="0.00" style={ui.field} />
+                      </div>
+                    </Field>
+                    <Field label="Lead time">
+                      <input className="field" value={partForm.lead_time} onChange={(e) => setPartForm((p) => ({ ...p, lead_time: e.target.value }))} placeholder="e.g. 2 weeks" style={ui.field} />
+                    </Field>
+                    <Field label="Notes" span={2}>
+                      <textarea className="field" value={partForm.notes} onChange={(e) => setPartForm((p) => ({ ...p, notes: e.target.value }))} placeholder="Compatible models, storage bin, substitutes, ordering notes" style={{ ...ui.field, minHeight: 82, resize: "vertical", lineHeight: 1.45 }} />
+                    </Field>
+                  </div>
+                  <div style={ui.mobileActionBar}>
+                    {partForm.id ? <button type="button" className="btn" style={ui.btnGhost} onClick={resetPartForm}>New part</button> : null}
+                    <button type="button" className="btn" style={ui.btnPrimary} onClick={savePart}>{partForm.id ? "Update part" : "Add part"}</button>
+                  </div>
+                </Section>
+
+                {partForm.id ? (
+                  <Section title="Linked Equipment" right={<span style={ui.mutedSmall}>{(parts.find((p) => p.id === partForm.id)?.component_ids ?? []).length} linked</span>}>
+                    <input className="field" value={partLinkQuery} onChange={(e) => setPartLinkQuery(e.target.value)} placeholder="Search equipment to link" style={{ ...ui.field, width: "100%", marginBottom: 10 }} />
+                    <div style={ui.linkGrid}>
+                      {partLinkRows.map((r) => {
+                        const checked = (parts.find((p) => p.id === partForm.id)?.component_ids ?? []).includes(r.id);
+                        return (
+                          <button key={r.id} type="button" className="btn" style={{ ...ui.linkPill, ...(checked ? ui.linkPillActive : null) }} onClick={() => togglePartComponent(partForm.id, r.id)}>
+                            <span style={{ fontWeight: 900 }}>{r.name}</span>
+                            <span style={ui.mutedTiny}>{r.location || r.systems?.[0]?.name || "No location"}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </Section>
+                ) : null}
+
+                <Section title="Parts List" right={<span style={ui.mutedSmall}>{visibleParts.length} shown</span>}>
+                  <input className="field" value={partQuery} onChange={(e) => setPartQuery(e.target.value)} placeholder="Search parts, suppliers, notes" style={{ ...ui.field, width: "100%", marginBottom: 12 }} />
+                  <div style={ui.partRows}>
+                    {visibleParts.map((part) => {
+                      const linked = partLinkedComponents(part);
+                      const low = (Number(part.quantity) || 0) <= (Number(part.min_quantity) || 0);
+                      return (
+                        <div key={part.id} style={isMobile ? { ...ui.catalogPartCard, gridTemplateColumns: "1fr" } : ui.catalogPartCard}>
+                          <div style={{ minWidth: 0 }}>
+                            <div style={ui.partNameLine}><span style={ui.partName}>{part.name}</span>{low ? <Pill tone="danger">Low</Pill> : null}</div>
+                            <div style={ui.mutedSmall}>{[part.part_number || "No part no.", part.supplier || "No supplier", part.lead_time || "No lead time"].join(" • ")}</div>
+                            <div style={ui.linkedNames}>{linked.length ? linked.map((r) => r.name).join(" • ") : "Not linked to equipment yet"}</div>
+                          </div>
+                          <div style={isMobile ? { ...ui.partQtyBlock, textAlign: "left" } : ui.partQtyBlock}>
+                            <div style={ui.partQty}>{part.quantity}</div>
+                            <div style={ui.mutedTiny}>min {part.min_quantity}</div>
+                            <div style={ui.mutedTiny}>{part.currency || "AUD"} {(Number(part.price) || 0).toFixed(2)}</div>
+                          </div>
+                          <div style={ui.partActions}>
+                            <button type="button" className="btn" style={ui.btnPrimary} onClick={() => openPartsMode(part)}>Edit / link</button>
+                            <button type="button" className="btn" style={ui.btnDanger} onClick={() => deletePart(part.id)}>Delete</button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                    {!visibleParts.length ? <div style={ui.photoEmpty}><div style={ui.emptyTitle}>No parts yet.</div><div style={ui.emptySub}>Add a part above, then link it to equipment.</div></div> : null}
+                  </div>
+                </Section>
+              </div>
+            </div>
+          ) : null}
           {/* List */}
-          {showList ? (
+          {appMode === "equipment" && showList ? (
             <div style={ui.card}>
               <div style={ui.cardHeader}>
                 <div style={ui.h}>Components</div>
@@ -1199,7 +1574,7 @@ export default function Inventory() {
           ) : null}
 
           {/* Editor */}
-          {showEditor ? (
+          {appMode === "equipment" && showEditor ? (
             <div style={ui.card}>
               <div style={ui.editorTop}>
                 <div style={{ display: "flex", flexDirection: "column", gap: 6, minWidth: 0 }}>
@@ -1452,6 +1827,230 @@ export default function Inventory() {
                   </div>
                 </Section>
 
+                <Section
+                  title="Shared Parts"
+                  right={
+                    isEditing ? (
+                      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
+                        <Pill tone="brand">{linkedParts.length} linked</Pill>
+                        {lowStockParts.length ? <Pill tone="danger">{lowStockParts.length} low</Pill> : null}
+                        <Pill tone="muted">AUD {linkedPartsValue.toFixed(2)}</Pill>
+                      </div>
+                    ) : (
+                      <span style={ui.mutedSmall}>Create first</span>
+                    )
+                  }
+                >
+                  {!isEditing ? (
+                    <div style={ui.photoEmpty}>
+                      <div style={ui.emptyTitle}>Create the component to link shared spares and consumables.</div>
+                      <div style={ui.emptySub}>
+                        Parts live in a shared catalogue, so the same filter, belt, impeller, oil, or kit can be linked to multiple pieces of equipment.
+                      </div>
+                    </div>
+                  ) : (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                      <div style={isMobile ? { ...ui.partsSummary, gridTemplateColumns: "1fr" } : ui.partsSummary}>
+                        <div style={ui.metricTile}>
+                          <div style={ui.metricValue}>{linkedParts.length}</div>
+                          <div style={ui.metricLabel}>Compatible</div>
+                        </div>
+                        <div style={ui.metricTile}>
+                          <div style={ui.metricValue}>{lowStockParts.length}</div>
+                          <div style={ui.metricLabel}>At or below min</div>
+                        </div>
+                        <div style={ui.metricTile}>
+                          <div style={ui.metricValue}>AUD {linkedPartsValue.toFixed(0)}</div>
+                          <div style={ui.metricLabel}>Stock value</div>
+                        </div>
+                      </div>
+
+                      <div style={ui.partFormPanel}>
+                        <div style={isMobile ? ui.formGridMobile : ui.formGrid}>
+                          <Field label="Part / consumable" hint="Shared catalogue">
+                            <input
+                              className="field"
+                              value={partForm.name}
+                              onChange={(e) => setPartForm((p) => ({ ...p, name: e.target.value }))}
+                              placeholder="e.g. Racor 2020 filter"
+                              style={ui.field}
+                            />
+                          </Field>
+
+                          <Field label="Part number">
+                            <input
+                              className="field"
+                              value={partForm.part_number}
+                              onChange={(e) => setPartForm((p) => ({ ...p, part_number: e.target.value }))}
+                              placeholder="SKU / OEM / alt number"
+                              style={ui.field}
+                            />
+                          </Field>
+
+                          <Field label="Qty onboard">
+                            <input
+                              className="field"
+                              type="number"
+                              min="0"
+                              step="1"
+                              value={partForm.quantity}
+                              onChange={(e) => setPartForm((p) => ({ ...p, quantity: e.target.value }))}
+                              style={ui.field}
+                            />
+                          </Field>
+
+                          <Field label="Minimum qty">
+                            <input
+                              className="field"
+                              type="number"
+                              min="0"
+                              step="1"
+                              value={partForm.min_quantity}
+                              onChange={(e) => setPartForm((p) => ({ ...p, min_quantity: e.target.value }))}
+                              style={ui.field}
+                            />
+                          </Field>
+
+                          <Field label="Supplier">
+                            <input
+                              className="field"
+                              value={partForm.supplier}
+                              onChange={(e) => setPartForm((p) => ({ ...p, supplier: e.target.value }))}
+                              placeholder="e.g. Norship, RS, OEM"
+                              style={ui.field}
+                            />
+                          </Field>
+
+                          <Field label="Price">
+                            <div style={{ display: "grid", gridTemplateColumns: "86px 1fr", gap: 8 }}>
+                              <input
+                                className="field"
+                                value={partForm.currency}
+                                onChange={(e) => setPartForm((p) => ({ ...p, currency: e.target.value.toUpperCase() }))}
+                                placeholder="AUD"
+                                style={ui.field}
+                              />
+                              <input
+                                className="field"
+                                type="number"
+                                min="0"
+                                step="0.01"
+                                value={partForm.price}
+                                onChange={(e) => setPartForm((p) => ({ ...p, price: e.target.value }))}
+                                placeholder="0.00"
+                                style={ui.field}
+                              />
+                            </div>
+                          </Field>
+
+                          <Field label="Lead time">
+                            <input
+                              className="field"
+                              value={partForm.lead_time}
+                              onChange={(e) => setPartForm((p) => ({ ...p, lead_time: e.target.value }))}
+                              placeholder="e.g. 2 weeks"
+                              style={ui.field}
+                            />
+                          </Field>
+
+                          <Field label="Notes" span={2}>
+                            <textarea
+                              className="field"
+                              value={partForm.notes}
+                              onChange={(e) => setPartForm((p) => ({ ...p, notes: e.target.value }))}
+                              placeholder="Compatible models, storage bin, substitutes, ordering notes"
+                              style={{ ...ui.field, minHeight: 76, resize: "vertical", lineHeight: 1.45 }}
+                            />
+                          </Field>
+                        </div>
+
+                        <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", flexWrap: "wrap", marginTop: 12 }}>
+                          {partForm.id ? (
+                            <button type="button" className="btn" style={ui.btnGhost} onClick={resetPartForm}>
+                              Clear
+                            </button>
+                          ) : null}
+                          <button type="button" className="btn" style={ui.btnPrimary} onClick={savePart}>
+                            {partForm.id ? "Update part" : "Add shared part"}
+                          </button>
+                        </div>
+                      </div>
+
+                      <div style={ui.partCatalog}>
+                        <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+                          <div style={{ fontWeight: 950 }}>Catalogue</div>
+                          <div style={ui.mutedSmall}>{parts.length} saved locally</div>
+                          <input
+                            className="field"
+                            value={partQuery}
+                            onChange={(e) => setPartQuery(e.target.value)}
+                            placeholder="Search parts, suppliers, notes"
+                            style={{ ...ui.field, marginLeft: "auto", minWidth: isMobile ? "100%" : 260 }}
+                          />
+                        </div>
+
+                        <div style={ui.partRows}>
+                          {visibleParts.map((part) => {
+                            const linked = compatiblePartIds.has(part.id);
+                            const low = (Number(part.quantity) || 0) <= (Number(part.min_quantity) || 0);
+                            return (
+                              <div key={part.id} style={isMobile ? { ...ui.partRow, gridTemplateColumns: "1fr", alignItems: "stretch" } : ui.partRow}>
+                                <div style={{ minWidth: 0 }}>
+                                  <div style={ui.partNameLine}>
+                                    <span style={ui.partName}>{part.name}</span>
+                                    {linked ? <Pill tone="brand">Fits this</Pill> : null}
+                                    {low ? <Pill tone="danger">Low</Pill> : null}
+                                  </div>
+                                  <div style={ui.mutedSmall}>
+                                    {[part.part_number || "No part no.", part.supplier || "No supplier", part.lead_time || "No lead time"]
+                                      .filter(Boolean)
+                                      .join(" • ")}
+                                  </div>
+                                  <div style={ui.mutedTiny}>
+                                    Linked to {(part.component_ids ?? []).length} component{(part.component_ids ?? []).length === 1 ? "" : "s"}
+                                  </div>
+                                </div>
+
+                                <div style={isMobile ? { ...ui.partQtyBlock, textAlign: "left" } : ui.partQtyBlock}>
+                                  <div style={ui.partQty}>{part.quantity}</div>
+                                  <div style={ui.mutedTiny}>min {part.min_quantity}</div>
+                                  <div style={ui.mutedTiny}>
+                                    {part.currency || "AUD"} {(Number(part.price) || 0).toFixed(2)}
+                                  </div>
+                                </div>
+
+                                <div style={ui.partActions}>
+                                  {linked ? (
+                                    <button type="button" className="btn" style={ui.btnGhost} onClick={() => unlinkPart(part.id)}>
+                                      Unlink
+                                    </button>
+                                  ) : (
+                                    <button type="button" className="btn" style={ui.btnPrimary} onClick={() => linkPart(part.id)}>
+                                      Link
+                                    </button>
+                                  )}
+                                  <button type="button" className="btn" style={ui.btnGhost} onClick={() => editPart(part)}>
+                                    Edit
+                                  </button>
+                                  <button type="button" className="btn" style={ui.btnDanger} onClick={() => deletePart(part.id)}>
+                                    Delete
+                                  </button>
+                                </div>
+                              </div>
+                            );
+                          })}
+
+                          {!visibleParts.length ? (
+                            <div style={ui.photoEmpty}>
+                              <div style={ui.emptyTitle}>No parts in the catalogue yet.</div>
+                              <div style={ui.emptySub}>Add the first shared spare or consumable above.</div>
+                            </div>
+                          ) : null}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </Section>
                 <Section title="SeaHub">
                   <div style={ui.seahubRow}>
                     <label style={ui.toggleLarge}>
@@ -1683,6 +2282,22 @@ export default function Inventory() {
           ) : null}
         </div>
       </div>
+
+      {isMobile ? (
+        <div style={ui.bottomDock}>
+          <button type="button" className="btn" style={{ ...ui.dockBtn, ...(appMode === "equipment" ? ui.dockBtnActive : null) }} onClick={() => setAppMode("equipment")}>
+            <span style={ui.dockIcon}>EQ</span>
+            <span>Equipment</span>
+          </button>
+          <button type="button" className="btn" style={{ ...ui.dockBtn, ...(appMode === "parts" ? ui.dockBtnActive : null) }} onClick={() => setAppMode("parts")}>
+            <span style={ui.dockIcon}>PT</span>
+            <span>Parts</span>
+          </button>
+          <button type="button" className="btn" style={ui.dockAction} onClick={startCaptureFirst}>
+            Photo first
+          </button>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -1694,9 +2309,10 @@ const ui = {
     fontFamily: `ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial`,
     color: "#0B0F14",
     background:
-      "radial-gradient(1200px 600px at 10% -10%, rgba(2,6,23,0.10), transparent 60%)," +
-      "radial-gradient(900px 500px at 90% 10%, rgba(2,6,23,0.07), transparent 55%)," +
-      "linear-gradient(180deg, #F7F8FA 0%, #F2F4F7 100%)",
+      "linear-gradient(135deg, rgba(12,74,110,0.10) 0%, transparent 34%)," +
+      "radial-gradient(900px 520px at 92% 8%, rgba(20,184,166,0.16), transparent 55%)," +
+      "radial-gradient(760px 440px at 4% 92%, rgba(245,158,11,0.10), transparent 56%)," +
+      "linear-gradient(180deg, #F3F7F8 0%, #E9EEF0 100%)",
     minHeight: "100vh",
   } as React.CSSProperties,
 
@@ -1744,10 +2360,12 @@ const ui = {
     position: "sticky",
     top: 0,
     zIndex: 20,
-    padding: 16,
-    borderBottom: "1px solid rgba(15, 23, 42, 0.08)",
-    background: "linear-gradient(180deg, rgba(255,255,255,0.88) 0%, rgba(255,255,255,0.72) 100%)",
-    backdropFilter: "blur(12px)",
+    padding: "14px 16px",
+    borderBottom: "1px solid rgba(255,255,255,0.12)",
+    background:
+      "linear-gradient(135deg, rgba(7,19,31,0.96) 0%, rgba(10,37,46,0.94) 52%, rgba(15,23,42,0.94) 100%)",
+    backdropFilter: "blur(18px)",
+    boxShadow: "0 18px 42px rgba(2,6,23,0.22)",
   } as React.CSSProperties,
 
   topbarCompact: {
@@ -1755,6 +2373,155 @@ const ui = {
     paddingBottom: 10,
   } as React.CSSProperties,
 
+  modeTabs: {
+    display: "flex",
+    borderRadius: 16,
+    border: "1px solid rgba(255,255,255,0.16)",
+    background: "rgba(255,255,255,0.09)",
+    padding: 4,
+    gap: 4,
+    boxShadow: "inset 0 1px 0 rgba(255,255,255,0.10)",
+  } as React.CSSProperties,
+  modeTabsMobile: {
+    display: "grid",
+    gridTemplateColumns: "1fr 1fr",
+    width: "100%",
+    borderRadius: 16,
+    border: "1px solid rgba(255,255,255,0.16)",
+    background: "rgba(255,255,255,0.09)",
+    padding: 4,
+    gap: 4,
+    order: 3,
+  } as React.CSSProperties,
+  modeTab: {
+    minHeight: 44,
+    padding: "10px 14px",
+    border: "none",
+    borderRadius: 12,
+    background: "transparent",
+    color: "rgba(255,255,255,0.72)",
+    fontWeight: 950,
+    cursor: "pointer",
+  } as React.CSSProperties,
+  modeTabActive: {
+    background: "linear-gradient(180deg, #FFFFFF 0%, #DFF9F2 100%)",
+    color: "#07131F",
+    boxShadow: "0 10px 22px rgba(0,0,0,0.18)",
+  } as React.CSSProperties,
+
+  partsHero: {
+    padding: 18,
+    display: "grid",
+    gridTemplateColumns: "1fr auto",
+    gap: 16,
+    alignItems: "center",
+    borderBottom: "1px solid rgba(2,6,23,0.08)",
+    background:
+      "linear-gradient(135deg, rgba(7,19,31,0.94) 0%, rgba(12,74,110,0.84) 55%, rgba(20,184,166,0.32) 100%)",
+    color: "#fff",
+  } as React.CSSProperties,
+  overline: { fontSize: 11, fontWeight: 950, opacity: 0.58, textTransform: "uppercase" } as React.CSSProperties,
+  partsHeroTitle: { marginTop: 4, fontWeight: 980, fontSize: 22, letterSpacing: "0" } as React.CSSProperties,
+  partsHeroSub: { marginTop: 4, fontSize: 13, opacity: 0.68, lineHeight: 1.35 } as React.CSSProperties,
+  partsHeroStats: { display: "grid", gridTemplateColumns: "repeat(3, minmax(110px, 1fr))", gap: 10 } as React.CSSProperties,
+  mobileActionBar: { display: "flex", gap: 10, justifyContent: "flex-end", flexWrap: "wrap", marginTop: 12 } as React.CSSProperties,
+  linkGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 8 } as React.CSSProperties,
+  linkPill: {
+    minHeight: 58,
+    padding: 10,
+    borderRadius: 12,
+    border: "1px solid rgba(2,6,23,0.10)",
+    background: "rgba(255,255,255,0.78)",
+    textAlign: "left",
+    display: "flex",
+    flexDirection: "column",
+    gap: 3,
+    cursor: "pointer",
+  } as React.CSSProperties,
+  linkPillActive: {
+    borderColor: "rgba(16,185,129,0.42)",
+    background: "rgba(209,250,229,0.64)",
+  } as React.CSSProperties,
+  catalogPartCard: {
+    display: "grid",
+    gridTemplateColumns: "1fr auto auto",
+    gap: 12,
+    alignItems: "center",
+    borderRadius: 16,
+    border: "1px solid rgba(2,6,23,0.08)",
+    background: "linear-gradient(180deg, rgba(255,255,255,0.92) 0%, rgba(248,250,252,0.86) 100%)",
+    padding: 14,
+  } as React.CSSProperties,
+  linkedNames: { marginTop: 6, fontSize: 12, opacity: 0.66, lineHeight: 1.35 } as React.CSSProperties,
+  commandStrip: {
+    display: "grid",
+    gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
+    gap: 12,
+    marginBottom: 14,
+  } as React.CSSProperties,
+  commandStripMobile: {
+    display: "grid",
+    gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
+    gap: 8,
+    marginBottom: 12,
+  } as React.CSSProperties,
+  commandTile: {
+    minHeight: 74,
+    border: "1px solid rgba(2,6,23,0.08)",
+    borderRadius: 16,
+    background: "linear-gradient(180deg, rgba(255,255,255,0.86) 0%, rgba(240,253,250,0.70) 100%)",
+    boxShadow: "0 12px 30px rgba(15,23,42,0.08)",
+    padding: 12,
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "flex-start",
+    justifyContent: "space-between",
+    cursor: "pointer",
+  } as React.CSSProperties,
+  commandKicker: { fontSize: 10, fontWeight: 950, opacity: 0.58, textTransform: "uppercase" } as React.CSSProperties,
+  commandValue: { fontSize: 24, fontWeight: 980, letterSpacing: "0", lineHeight: 1 } as React.CSSProperties,
+  commandLabel: { fontSize: 11, opacity: 0.64, fontWeight: 850 } as React.CSSProperties,
+  bottomDock: {
+    position: "fixed",
+    left: 10,
+    right: 10,
+    bottom: "calc(10px + env(safe-area-inset-bottom))",
+    zIndex: 60,
+    display: "grid",
+    gridTemplateColumns: "1fr 1fr 1.15fr",
+    gap: 8,
+    padding: 8,
+    borderRadius: 20,
+    border: "1px solid rgba(255,255,255,0.20)",
+    background: "rgba(7,19,31,0.92)",
+    boxShadow: "0 18px 44px rgba(2,6,23,0.32)",
+    backdropFilter: "blur(18px)",
+  } as React.CSSProperties,
+  dockBtn: {
+    minHeight: 54,
+    borderRadius: 15,
+    border: "1px solid rgba(255,255,255,0.10)",
+    background: "rgba(255,255,255,0.07)",
+    color: "rgba(255,255,255,0.78)",
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 2,
+    fontSize: 11,
+    fontWeight: 900,
+  } as React.CSSProperties,
+  dockBtnActive: { background: "rgba(45,212,191,0.18)", color: "#fff", borderColor: "rgba(45,212,191,0.36)" } as React.CSSProperties,
+  dockIcon: { fontSize: 10, opacity: 0.72, fontWeight: 950 } as React.CSSProperties,
+  dockAction: {
+    minHeight: 54,
+    borderRadius: 15,
+    border: "1px solid rgba(45,212,191,0.42)",
+    background: "linear-gradient(180deg, #2DD4BF 0%, #0E7490 100%)",
+    color: "#021014",
+    fontWeight: 980,
+    boxShadow: "0 12px 24px rgba(45,212,191,0.24)",
+  } as React.CSSProperties,
   topbarInner: {
     display: "flex",
     gap: 12,
@@ -1772,10 +2539,10 @@ const ui = {
   } as React.CSSProperties,
 
   titleRow: { display: "flex", alignItems: "baseline", gap: 10 } as React.CSSProperties,
-  title: { fontWeight: 950, fontSize: 16, letterSpacing: "-0.02em" } as React.CSSProperties,
+  title: { fontWeight: 950, fontSize: 17, letterSpacing: "0", color: "#fff" } as React.CSSProperties,
   subtitle: {
     fontSize: 12,
-    opacity: 0.66,
+    color: "rgba(255,255,255,0.72)",
     display: "flex",
     alignItems: "center",
     gap: 8,
@@ -1786,30 +2553,31 @@ const ui = {
     width: 8,
     height: 8,
     borderRadius: 999,
-    background: "rgba(2,6,23,0.25)",
+    background: "rgba(45,212,191,0.78)",
     display: "inline-block",
   } as React.CSSProperties,
 
-  shell: { maxWidth: 1320, margin: "0 auto", padding: 16 } as React.CSSProperties,
+  shell: { maxWidth: 1320, margin: "0 auto", padding: "14px 12px 96px" } as React.CSSProperties,
   grid: { display: "grid", gridTemplateColumns: "1.1fr 0.9fr", gap: 16 } as React.CSSProperties,
   gridMobile: { display: "grid", gridTemplateColumns: "1fr", gap: 16 } as React.CSSProperties,
 
   card: {
     borderRadius: 18,
     border: "1px solid rgba(2, 6, 23, 0.10)",
-    background: "linear-gradient(180deg, #FFFFFF 0%, #FBFCFD 100%)",
-    boxShadow: "0 1px 2px rgba(2,6,23,0.05), 0 14px 34px rgba(2,6,23,0.07)",
+    background: "linear-gradient(180deg, rgba(255,255,255,0.96) 0%, rgba(248,250,252,0.90) 100%)",
+    boxShadow: "0 2px 8px rgba(2,6,23,0.06), 0 20px 50px rgba(15,23,42,0.10)",
     overflow: "hidden",
   } as React.CSSProperties,
 
   cardPad: { padding: 16, display: "flex", flexDirection: "column", gap: 14 } as React.CSSProperties,
 
   cardHeader: {
-    padding: 14,
-    borderBottom: "1px solid rgba(2, 6, 23, 0.06)",
+    padding: 15,
+    borderBottom: "1px solid rgba(2, 6, 23, 0.07)",
     display: "flex",
     alignItems: "center",
     gap: 10,
+    background: "linear-gradient(180deg, rgba(255,255,255,0.72) 0%, rgba(236,253,245,0.30) 100%)",
   } as React.CSSProperties,
 
   h: { fontWeight: 950, letterSpacing: "-0.02em" } as React.CSSProperties,
@@ -1855,33 +2623,36 @@ const ui = {
   } as React.CSSProperties,
 
   btnPrimary: {
+    minHeight: 44,
     padding: "10px 14px",
-    borderRadius: 12,
-    border: "1px solid rgba(2,6,23,0.65)",
-    background: "linear-gradient(180deg, #0B0F14 0%, #111827 100%)",
+    borderRadius: 13,
+    border: "1px solid rgba(14,116,144,0.40)",
+    background: "linear-gradient(180deg, #0E7490 0%, #0F3B4A 100%)",
     color: "#fff",
-    fontWeight: 900,
+    fontWeight: 950,
     cursor: "pointer",
-    boxShadow: "0 10px 22px rgba(2,6,23,0.18)",
+    boxShadow: "0 12px 24px rgba(14,116,144,0.22)",
   } as React.CSSProperties,
 
   btnGhost: {
+    minHeight: 44,
     padding: "10px 14px",
-    borderRadius: 12,
-    border: "1px solid rgba(2,6,23,0.14)",
-    background: "rgba(255,255,255,0.70)",
+    borderRadius: 13,
+    border: "1px solid rgba(15,23,42,0.13)",
+    background: "rgba(255,255,255,0.78)",
     color: "#0B0F14",
-    fontWeight: 850,
+    fontWeight: 900,
     cursor: "pointer",
   } as React.CSSProperties,
 
   btnDanger: {
+    minHeight: 44,
     padding: "10px 14px",
-    borderRadius: 12,
-    border: "1px solid rgba(239,68,68,0.30)",
-    background: "rgba(255,255,255,0.75)",
-    color: "#B91C1C",
-    fontWeight: 900,
+    borderRadius: 13,
+    border: "1px solid rgba(225,29,72,0.24)",
+    background: "rgba(255,255,255,0.82)",
+    color: "#BE123C",
+    fontWeight: 950,
     cursor: "pointer",
   } as React.CSSProperties,
 
@@ -2055,15 +2826,17 @@ const ui = {
   section: {
     borderRadius: 16,
     border: "1px solid rgba(2,6,23,0.08)",
-    background: "rgba(255,255,255,0.70)",
+    background: "rgba(255,255,255,0.78)",
     overflow: "hidden",
+    boxShadow: "0 10px 26px rgba(15,23,42,0.045)",
   } as React.CSSProperties,
   sectionHeader: {
-    padding: "12px 12px",
-    borderBottom: "1px solid rgba(2,6,23,0.06)",
+    padding: "13px 12px",
+    borderBottom: "1px solid rgba(2,6,23,0.07)",
     display: "flex",
     alignItems: "center",
     gap: 10,
+    background: "linear-gradient(90deg, rgba(20,184,166,0.10) 0%, rgba(255,255,255,0.24) 100%)",
   } as React.CSSProperties,
   sectionTitle: { fontWeight: 950, letterSpacing: "-0.01em" } as React.CSSProperties,
   sectionBody: { padding: 12 } as React.CSSProperties,
@@ -2126,6 +2899,54 @@ const ui = {
     gap: 8,
   } as React.CSSProperties,
 
+  partsSummary: {
+    display: "grid",
+    gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
+    gap: 10,
+  } as React.CSSProperties,
+
+  metricTile: {
+    borderRadius: 14,
+    border: "1px solid rgba(2,6,23,0.08)",
+    background: "linear-gradient(180deg, rgba(255,255,255,0.88) 0%, rgba(246,247,249,0.78) 100%)",
+    padding: 12,
+    minWidth: 0,
+  } as React.CSSProperties,
+  metricValue: { fontWeight: 950, fontSize: 18, letterSpacing: "-0.01em" } as React.CSSProperties,
+  metricLabel: { marginTop: 2, fontSize: 11, opacity: 0.62, fontWeight: 850 } as React.CSSProperties,
+
+  partFormPanel: {
+    borderRadius: 16,
+    border: "1px solid rgba(2,6,23,0.08)",
+    background: "rgba(255,255,255,0.62)",
+    padding: 12,
+  } as React.CSSProperties,
+
+  partCatalog: {
+    borderRadius: 16,
+    border: "1px solid rgba(2,6,23,0.08)",
+    background: "rgba(2,6,23,0.025)",
+    padding: 12,
+    display: "flex",
+    flexDirection: "column",
+    gap: 12,
+  } as React.CSSProperties,
+  partRows: { display: "flex", flexDirection: "column", gap: 10 } as React.CSSProperties,
+  partRow: {
+    display: "grid",
+    gridTemplateColumns: "1fr auto auto",
+    gap: 12,
+    alignItems: "center",
+    borderRadius: 14,
+    border: "1px solid rgba(2,6,23,0.08)",
+    background: "rgba(255,255,255,0.76)",
+    padding: 12,
+  } as React.CSSProperties,
+  partNameLine: { display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" } as React.CSSProperties,
+  partName: { fontWeight: 950, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" } as React.CSSProperties,
+  partQtyBlock: { minWidth: 82, textAlign: "right" } as React.CSSProperties,
+  partQty: { fontWeight: 950, fontSize: 18 } as React.CSSProperties,
+  partActions: { display: "flex", gap: 8, justifyContent: "flex-end", flexWrap: "wrap" } as React.CSSProperties,
   mobileFilters: { width: "100%", display: "flex", flexDirection: "column", gap: 10 } as React.CSSProperties,
   mobileRow: { display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" } as React.CSSProperties,
 };
@@ -2144,5 +2965,9 @@ const css = `
     box-shadow: 0 14px 34px rgba(2,6,23,0.10);
     transform: translateY(-1px);
     transition: transform 120ms ease, box-shadow 120ms ease;
+  }
+  @media (max-width: 980px) {
+    .btn { -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
+    input, select, textarea { font-size: 16px !important; }
   }
 `;
