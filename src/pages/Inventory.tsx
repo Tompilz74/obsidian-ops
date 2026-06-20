@@ -444,6 +444,9 @@ export default function Inventory() {
 
   // File input
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const quickFileInputRef = useRef<HTMLInputElement | null>(null);
+  const [quickCaptureOpen, setQuickCaptureOpen] = useState(false);
+  const [quickName, setQuickName] = useState("");
 
   // Form
   const emptyForm = {
@@ -640,14 +643,36 @@ export default function Inventory() {
     if (isMobile) setMobileTab("editor");
   }
 
+  function openQuickCapture() {
+    resetDraft();
+    setForm({ ...emptyForm });
+    setPartForm({ ...emptyPartForm });
+    setSelectedId(null);
+    setPhotos([]);
+    setPhotoUrls({});
+    setQuickName("");
+    setAppMode("equipment");
+    setQuickCaptureOpen(true);
+    if (isMobile) setMobileTab("editor");
+    window.setTimeout(() => quickTakePhoto(false), 140);
+  }
+
+  function quickTakePhoto(fromLibrary = false) {
+    const input = quickFileInputRef.current;
+    if (!input) return;
+    if (fromLibrary) input.removeAttribute("capture");
+    else input.setAttribute("capture", "environment");
+    input.click();
+  }
+
+  function closeQuickCapture() {
+    setQuickCaptureOpen(false);
+    setQuickName("");
+    resetDraft();
+  }
+
   function startCaptureFirst() {
-    startAdd();
-    window.setTimeout(() => {
-      if (fileInputRef.current) {
-        fileInputRef.current.setAttribute("capture", "environment");
-        fileInputRef.current.click();
-      }
-    }, 90);
+    openQuickCapture();
   }
 
   function startEdit(r: ComponentRow) {
@@ -793,6 +818,57 @@ export default function Inventory() {
       }
     } catch (e: any) {
       showToast("error", e.message ?? "Save failed", "Error");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function saveQuickCapture() {
+    const name = quickName.trim();
+    if (!name) {
+      showToast("error", "Add a quick name first.", "Can’t save");
+      return;
+    }
+
+    const payload = {
+      name,
+      make: null,
+      model: null,
+      serial_number: null,
+      location: null,
+      supplier: null,
+      installed_at: null,
+      manual_url: null,
+      notes: null,
+      status: "active",
+      critical: false,
+      tags: [],
+      vessel_id: vessels.length === 1 ? vessels[0].id : null,
+      system_id: null,
+      department_id: null,
+      seahub_synced: false,
+      seahub_ref: null,
+      seahub_synced_at: null,
+    };
+
+    setLoading(true);
+    try {
+      const res = await supabase.from("components").insert(payload).select("id").single();
+      if (res.error) throw res.error;
+
+      const newId = res.data.id as string;
+      await finalizePendingPhotos(newId);
+      await loadPhotos(newId);
+      await loadComponents();
+
+      setSelectedId(newId);
+      setForm({ ...emptyForm, id: newId, name });
+      setQuickCaptureOpen(false);
+      setQuickName("");
+      if (isMobile) setMobileTab("editor");
+      showToast("success", "Quick item added. Details can wait.");
+    } catch (e: any) {
+      showToast("error", e.message ?? "Quick add failed", "Error");
     } finally {
       setLoading(false);
     }
@@ -971,7 +1047,10 @@ export default function Inventory() {
       if (up.error) throw up.error;
 
       setPendingPhotos((p) => [...p, { tempPath, fileName: file.name, previewUrl }]);
-      showToast("success", "Photo added. Hit Create to save it with the component.");
+      showToast(
+        "success",
+        quickCaptureOpen ? "Photo added. Add more or save the quick item." : "Photo added. Hit Create to save it with the component."
+      );
     } catch (e: any) {
       try {
         URL.revokeObjectURL(previewUrl);
@@ -1093,6 +1172,90 @@ export default function Inventory() {
         ) : null}
       </div>
 
+
+      {quickCaptureOpen ? (
+        <div style={ui.quickOverlay}>
+          <div style={ui.quickSheet}>
+            <div style={ui.quickGrabber} />
+            <div style={ui.quickTopLine}>
+              <div>
+                <div style={ui.quickTitle}>Quick add</div>
+                <div style={ui.quickSub}>Shoot equipment, serial plates, labels, then name it and move on.</div>
+              </div>
+              <button type="button" className="btn" style={ui.quickClose} onClick={closeQuickCapture}>
+                Close
+              </button>
+            </div>
+
+            <input
+              ref={quickFileInputRef}
+              type="file"
+              accept="image/*"
+              capture="environment"
+              multiple
+              style={{ display: "none" }}
+              onChange={(e) => {
+                const files = Array.from(e.currentTarget.files ?? []);
+                files.forEach((f) => void uploadPhoto(f));
+                e.currentTarget.value = "";
+              }}
+            />
+
+            <div style={ui.quickCameraRow}>
+              <button type="button" className="btn" style={ui.quickCameraBtn} onClick={() => quickTakePhoto(false)} disabled={loading}>
+                Take photo
+              </button>
+              <button type="button" className="btn" style={ui.quickSecondaryBtn} onClick={() => quickTakePhoto(true)} disabled={loading}>
+                Library
+              </button>
+            </div>
+
+            {pendingPhotos.length ? (
+              <div style={ui.quickPhotoRail}>
+                {pendingPhotos.map((p, index) => (
+                  <a key={p.tempPath} href={p.previewUrl} target="_blank" rel="noreferrer" style={ui.quickThumbLink}>
+                    <div style={ui.quickThumb}>
+                      <img src={p.previewUrl} alt={`Quick capture ${index + 1}`} style={ui.quickThumbImg} />
+                      <div style={ui.quickThumbCount}>{index + 1}</div>
+                    </div>
+                  </a>
+                ))}
+              </div>
+            ) : (
+              <div style={ui.quickEmpty}>No photos yet. Tap Take photo and move fast.</div>
+            )}
+
+            <label style={ui.quickNameWrap}>
+              <span style={ui.quickLabel}>What is it?</span>
+              <input
+                style={ui.quickNameInput}
+                value={quickName}
+                autoFocus
+                placeholder="Main bilge pump, aft fire extinguisher..."
+                onChange={(e) => setQuickName(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") void saveQuickCapture();
+                }}
+              />
+            </label>
+
+            <div style={ui.quickFooter}>
+              <button type="button" className="btn" style={ui.quickSecondaryBtn} onClick={closeQuickCapture} disabled={loading}>
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="btn"
+                style={{ ...ui.quickSaveBtn, opacity: quickName.trim() ? 1 : 0.55 }}
+                onClick={() => void saveQuickCapture()}
+                disabled={loading || !quickName.trim()}
+              >
+                Save quick item
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
       {/* Top Bar */}
       <div style={{ ...ui.topbar, ...(isMobileEditor ? ui.topbarCompact : null) }}>
         <div style={ui.topbarInner}>
@@ -1144,7 +1307,7 @@ export default function Inventory() {
                   ← List
                 </button>
                 <button onClick={startCaptureFirst} className="btn" style={ui.btnPrimary}>
-                  Photo first
+                  Quick add
                 </button>
                 <button onClick={startAdd} className="btn" style={ui.btnGhost}>
                   + Add
@@ -1172,7 +1335,7 @@ export default function Inventory() {
                 </div>
 
                 <button onClick={startCaptureFirst} className="btn" style={ui.btnPrimary}>
-                  Photo first
+                  Quick add
                 </button>
                 <button onClick={startAdd} className="btn" style={ui.btnGhost}>
                   + Add
@@ -1270,7 +1433,7 @@ export default function Inventory() {
               </div>
 
               <button onClick={startCaptureFirst} className="btn" style={{ ...ui.btnPrimary, marginLeft: "auto" }}>
-                Photo first
+                Quick add
               </button>
               <button onClick={startAdd} className="btn" style={ui.btnGhost}>
                 + Add
@@ -2294,7 +2457,7 @@ export default function Inventory() {
             <span>Parts</span>
           </button>
           <button type="button" className="btn" style={ui.dockAction} onClick={startCaptureFirst}>
-            Photo first
+            Quick add
           </button>
         </div>
       ) : null}
@@ -2354,6 +2517,137 @@ const ui = {
     opacity: 0.55,
     fontSize: 14,
     padding: 4,
+  } as React.CSSProperties,
+
+  quickOverlay: {
+    position: "fixed",
+    inset: 0,
+    zIndex: 120,
+    display: "flex",
+    alignItems: "flex-end",
+    justifyContent: "center",
+    padding: "12px 12px calc(12px + env(safe-area-inset-bottom))",
+    background: "rgba(2,6,23,0.52)",
+    backdropFilter: "blur(8px)",
+  } as React.CSSProperties,
+  quickSheet: {
+    width: "min(560px, 100%)",
+    maxHeight: "calc(100vh - 24px)",
+    overflow: "auto",
+    borderRadius: 24,
+    border: "1px solid rgba(255,255,255,0.24)",
+    background: "linear-gradient(180deg, rgba(255,255,255,0.98) 0%, rgba(236,253,245,0.96) 100%)",
+    boxShadow: "0 28px 80px rgba(2,6,23,0.42)",
+    padding: 16,
+  } as React.CSSProperties,
+  quickGrabber: {
+    width: 46,
+    height: 5,
+    borderRadius: 999,
+    background: "rgba(2,6,23,0.20)",
+    margin: "0 auto 14px",
+  } as React.CSSProperties,
+  quickTopLine: { display: "flex", alignItems: "flex-start", gap: 12, justifyContent: "space-between" } as React.CSSProperties,
+  quickTitle: { fontSize: 24, fontWeight: 980, letterSpacing: "0", lineHeight: 1.05 } as React.CSSProperties,
+  quickSub: { marginTop: 5, fontSize: 13, lineHeight: 1.35, opacity: 0.68, maxWidth: 380 } as React.CSSProperties,
+  quickClose: {
+    minHeight: 38,
+    padding: "8px 12px",
+    borderRadius: 12,
+    border: "1px solid rgba(2,6,23,0.12)",
+    background: "rgba(255,255,255,0.72)",
+    fontWeight: 900,
+    cursor: "pointer",
+  } as React.CSSProperties,
+  quickCameraRow: { display: "grid", gridTemplateColumns: "1.3fr 0.7fr", gap: 10, marginTop: 16 } as React.CSSProperties,
+  quickCameraBtn: {
+    minHeight: 62,
+    borderRadius: 18,
+    border: "1px solid rgba(14,116,144,0.38)",
+    background: "linear-gradient(180deg, #0E7490 0%, #0F3B4A 100%)",
+    color: "#fff",
+    fontSize: 17,
+    fontWeight: 980,
+    cursor: "pointer",
+    boxShadow: "0 16px 28px rgba(14,116,144,0.24)",
+  } as React.CSSProperties,
+  quickSecondaryBtn: {
+    minHeight: 52,
+    borderRadius: 16,
+    border: "1px solid rgba(15,23,42,0.13)",
+    background: "rgba(255,255,255,0.82)",
+    color: "#0B0F14",
+    fontWeight: 950,
+    cursor: "pointer",
+  } as React.CSSProperties,
+  quickPhotoRail: {
+    display: "grid",
+    gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
+    gap: 8,
+    marginTop: 14,
+  } as React.CSSProperties,
+  quickThumbLink: { display: "block", textDecoration: "none" } as React.CSSProperties,
+  quickThumb: {
+    position: "relative",
+    aspectRatio: "1 / 1",
+    borderRadius: 14,
+    overflow: "hidden",
+    border: "1px solid rgba(2,6,23,0.12)",
+    background: "rgba(2,6,23,0.04)",
+  } as React.CSSProperties,
+  quickThumbImg: { width: "100%", height: "100%", objectFit: "cover", display: "block" } as React.CSSProperties,
+  quickThumbCount: {
+    position: "absolute",
+    top: 6,
+    right: 6,
+    minWidth: 24,
+    height: 24,
+    borderRadius: 999,
+    background: "rgba(2,6,23,0.72)",
+    color: "#fff",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    fontSize: 12,
+    fontWeight: 950,
+  } as React.CSSProperties,
+  quickEmpty: {
+    marginTop: 14,
+    minHeight: 72,
+    borderRadius: 16,
+    border: "1px dashed rgba(2,6,23,0.18)",
+    background: "rgba(255,255,255,0.56)",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 14,
+    fontSize: 13,
+    opacity: 0.68,
+    textAlign: "center",
+  } as React.CSSProperties,
+  quickNameWrap: { display: "flex", flexDirection: "column", gap: 7, marginTop: 16 } as React.CSSProperties,
+  quickLabel: { fontSize: 12, fontWeight: 950, opacity: 0.66, textTransform: "uppercase" } as React.CSSProperties,
+  quickNameInput: {
+    minHeight: 58,
+    padding: "12px 14px",
+    borderRadius: 16,
+    border: "1px solid rgba(2,6,23,0.16)",
+    background: "rgba(255,255,255,0.94)",
+    outline: "none",
+    fontSize: 16,
+    fontWeight: 850,
+    boxShadow: "inset 0 1px 0 rgba(255,255,255,0.94)",
+  } as React.CSSProperties,
+  quickFooter: { display: "grid", gridTemplateColumns: "0.8fr 1.2fr", gap: 10, marginTop: 16 } as React.CSSProperties,
+  quickSaveBtn: {
+    minHeight: 56,
+    borderRadius: 16,
+    border: "1px solid rgba(45,212,191,0.42)",
+    background: "linear-gradient(180deg, #2DD4BF 0%, #0E7490 100%)",
+    color: "#021014",
+    fontWeight: 980,
+    cursor: "pointer",
+    boxShadow: "0 14px 26px rgba(45,212,191,0.22)",
   } as React.CSSProperties,
 
   topbar: {
