@@ -79,6 +79,7 @@ type SeaHubInventoryRow = {
   currency: string;
   comments: string;
   image_name: string;
+  image_urls: string[];
   created_at: string;
 };
 
@@ -479,6 +480,7 @@ export default function Inventory() {
     currency: "AUD",
     comments: "",
     image_name: "",
+    image_urls: [] as string[],
   };
   const [seahubItems, setSeahubItems] = useState<SeaHubInventoryRow[]>(() => readStoredSeaHubInventory());
   const [seahubForm, setSeahubForm] = useState({ ...emptySeaHubForm });
@@ -507,6 +509,7 @@ export default function Inventory() {
   // File input
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const quickFileInputRef = useRef<HTMLInputElement | null>(null);
+  const seahubFileInputRef = useRef<HTMLInputElement | null>(null);
   const [quickCaptureOpen, setQuickCaptureOpen] = useState(false);
   const [quickName, setQuickName] = useState("");
 
@@ -997,6 +1000,43 @@ export default function Inventory() {
     setSeahubForm({ ...emptySeaHubForm });
   }
 
+  function openSeaHubPhotoPicker(fromLibrary = false) {
+    const input = seahubFileInputRef.current;
+    if (!input) return;
+    if (fromLibrary) input.removeAttribute("capture");
+    else input.setAttribute("capture", "environment");
+    input.click();
+  }
+
+  async function addSeaHubPhotos(files: File[]) {
+    const reads = files.map(
+      (file) =>
+        new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(String(reader.result ?? ""));
+          reader.onerror = () => reject(reader.error);
+          reader.readAsDataURL(file);
+        })
+    );
+
+    try {
+      const urls = (await Promise.all(reads)).filter(Boolean);
+      if (!urls.length) return;
+      setSeahubForm((p) => ({
+        ...p,
+        image_urls: [...(p.image_urls ?? []), ...urls],
+        image_name: p.image_name || `${urls.length} photo${urls.length === 1 ? "" : "s"}`,
+      }));
+      showToast("success", `${urls.length} photo${urls.length === 1 ? "" : "s"} added to SeaHub item.`);
+    } catch (e: any) {
+      showToast("error", e?.message ?? "Couldn’t read photo", "Photo error");
+    }
+  }
+
+  function removeSeaHubPhoto(index: number) {
+    setSeahubForm((p) => ({ ...p, image_urls: (p.image_urls ?? []).filter((_, i) => i !== index) }));
+  }
+
   function normaliseNumber(value: string) {
     const n = Number(value);
     return Number.isFinite(n) ? n : 0;
@@ -1073,6 +1113,7 @@ export default function Inventory() {
       currency: seahubForm.currency.trim() || "AUD",
       comments: seahubForm.comments.trim(),
       image_name: seahubForm.image_name,
+      image_urls: seahubForm.image_urls ?? [],
       created_at: seahubItems.find((item) => item.id === seahubForm.id)?.created_at ?? new Date().toISOString(),
     };
 
@@ -1103,6 +1144,7 @@ export default function Inventory() {
       currency: item.currency || "AUD",
       comments: item.comments,
       image_name: item.image_name,
+      image_urls: item.image_urls ?? [],
     });
     setAppMode("seahub");
     if (isMobile) setMobileTab("list");
@@ -1916,6 +1958,19 @@ export default function Inventory() {
 
               <div style={ui.cardPad}>
                 <Section title={seahubForm.id ? "Edit SeaHub Item" : "Add SeaHub Item"} right={<span style={ui.mutedSmall}>Saved on this device</span>}>
+                  <input
+                    ref={seahubFileInputRef}
+                    type="file"
+                    accept="image/*"
+                    capture="environment"
+                    multiple
+                    style={{ display: "none" }}
+                    onChange={(e) => {
+                      const files = Array.from(e.currentTarget.files ?? []);
+                      if (files.length) void addSeaHubPhotos(files);
+                      e.currentTarget.value = "";
+                    }}
+                  />
                   <div style={isMobile ? ui.formGridMobile : ui.formGrid}>
                     <Field label="Title" hint="Required">
                       <input className="field" value={seahubForm.title} onChange={(e) => setSeahubForm((p) => ({ ...p, title: e.target.value }))} placeholder="e.g. Oil filter, fire extinguisher" style={ui.field} />
@@ -1984,8 +2039,32 @@ export default function Inventory() {
                         <input className="field" value={seahubForm.currency} onChange={(e) => setSeahubForm((p) => ({ ...p, currency: e.target.value.toUpperCase() }))} placeholder="AUD" style={ui.field} />
                       </div>
                     </Field>
-                    <Field label="Image / photo note">
-                      <input className="field" value={seahubForm.image_name} onChange={(e) => setSeahubForm((p) => ({ ...p, image_name: e.target.value }))} placeholder="Photo filename or note" style={ui.field} />
+                    <Field label="Photos" hint={`${seahubForm.image_urls.length} attached`} span={2}>
+                      <div style={ui.seahubPhotoBox}>
+                        <div style={ui.seahubPhotoActions}>
+                          <button type="button" className="btn" style={ui.btnPrimary} onClick={() => openSeaHubPhotoPicker(false)}>
+                            Take photo
+                          </button>
+                          <button type="button" className="btn" style={ui.btnGhost} onClick={() => openSeaHubPhotoPicker(true)}>
+                            Library
+                          </button>
+                          <input className="field" value={seahubForm.image_name} onChange={(e) => setSeahubForm((p) => ({ ...p, image_name: e.target.value }))} placeholder="Photo note / label" style={{ ...ui.field, flex: 1, minWidth: 180 }} />
+                        </div>
+                        {seahubForm.image_urls.length ? (
+                          <div style={ui.seahubPhotoGrid}>
+                            {seahubForm.image_urls.map((url, index) => (
+                              <div key={`${url.slice(0, 32)}-${index}`} style={ui.seahubPhotoThumb}>
+                                <img src={url} alt={`SeaHub inventory ${index + 1}`} style={ui.quickThumbImg} />
+                                <button type="button" className="btn" style={ui.seahubPhotoRemove} onClick={() => removeSeaHubPhoto(index)} aria-label="Remove photo">
+                                  x
+                                </button>
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <div style={ui.quickEmpty}>Take photos of the part, label, serial, shelf, or SeaHub proof while you are moving.</div>
+                        )}
+                      </div>
                     </Field>
                     <Field label="Comments" span={2}>
                       <textarea className="field" value={seahubForm.comments} onChange={(e) => setSeahubForm((p) => ({ ...p, comments: e.target.value }))} placeholder="Condition, alternate numbers, anything to check later" style={{ ...ui.field, minHeight: 92, resize: "vertical", lineHeight: 1.45 }} />
@@ -2014,10 +2093,19 @@ export default function Inventory() {
                       const department = departments.find((d) => d.id === item.department_id)?.name ?? "No department";
                       const component = rows.find((r) => r.id === item.related_component_id)?.name ?? "No component";
                       const low = item.min_level > 0 && item.quantity <= item.min_level;
+                      const itemPhotos = item.image_urls ?? [];
                       return (
                         <div key={item.id} style={isMobile ? { ...ui.seahubItemCard, gridTemplateColumns: "1fr" } : ui.seahubItemCard}>
                           <div style={{ minWidth: 0 }}>
-                            <div style={ui.partNameLine}><span style={ui.partName}>{item.title}</span>{low ? <Pill tone="danger">Low</Pill> : null}{item.critical_status ? <Pill tone={item.critical_status === "Critical" ? "danger" : "muted"}>{item.critical_status}</Pill> : null}</div>
+                            {itemPhotos.length ? (
+                              <div style={ui.seahubListPhotos}>
+                                {itemPhotos.slice(0, 4).map((url, index) => (
+                                  <img key={`${item.id}-${index}`} src={url} alt={`${item.title} ${index + 1}`} style={ui.seahubListThumb} />
+                                ))}
+                                {itemPhotos.length > 4 ? <div style={ui.seahubPhotoMore}>+{itemPhotos.length - 4}</div> : null}
+                              </div>
+                            ) : null}
+                            <div style={ui.partNameLine}><span style={ui.partName}>{item.title}</span>{low ? <Pill tone="danger">Low</Pill> : null}{item.critical_status ? <Pill tone={item.critical_status === "Critical" ? "danger" : "muted"}>{item.critical_status}</Pill> : null}{itemPhotos.length ? <Pill tone="brand">{itemPhotos.length} photos</Pill> : null}</div>
                             <div style={ui.mutedSmall}>{[item.part_number, item.make || "No make", item.supplier || "No supplier"].join(" • ")}</div>
                             <div style={ui.linkedNames}>{[vessel, department, component, item.location || "No location"].join(" • ")}</div>
                           </div>
@@ -3069,6 +3157,56 @@ const ui = {
     color: "#fff",
   } as React.CSSProperties,
   seahubListTools: { display: "grid", gridTemplateColumns: "1fr auto", gap: 10, marginBottom: 12 } as React.CSSProperties,
+  seahubPhotoBox: {
+    borderRadius: 16,
+    border: "1px solid rgba(2,6,23,0.09)",
+    background: "rgba(255,255,255,0.62)",
+    padding: 12,
+  } as React.CSSProperties,
+  seahubPhotoActions: { display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" } as React.CSSProperties,
+  seahubPhotoGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(86px, 1fr))", gap: 10, marginTop: 12 } as React.CSSProperties,
+  seahubPhotoThumb: {
+    position: "relative",
+    aspectRatio: "1 / 1",
+    borderRadius: 14,
+    overflow: "hidden",
+    border: "1px solid rgba(2,6,23,0.12)",
+    background: "rgba(2,6,23,0.04)",
+  } as React.CSSProperties,
+  seahubPhotoRemove: {
+    position: "absolute",
+    top: 6,
+    right: 6,
+    width: 26,
+    height: 26,
+    borderRadius: 999,
+    border: "1px solid rgba(255,255,255,0.34)",
+    background: "rgba(2,6,23,0.70)",
+    color: "#fff",
+    fontWeight: 950,
+    cursor: "pointer",
+  } as React.CSSProperties,
+  seahubListPhotos: { display: "flex", gap: 6, marginBottom: 8, alignItems: "center" } as React.CSSProperties,
+  seahubListThumb: {
+    width: 42,
+    height: 42,
+    borderRadius: 10,
+    objectFit: "cover",
+    border: "1px solid rgba(2,6,23,0.12)",
+    background: "rgba(2,6,23,0.04)",
+  } as React.CSSProperties,
+  seahubPhotoMore: {
+    width: 42,
+    height: 42,
+    borderRadius: 10,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    border: "1px solid rgba(2,6,23,0.12)",
+    background: "rgba(2,6,23,0.06)",
+    fontSize: 12,
+    fontWeight: 950,
+  } as React.CSSProperties,
   seahubItemCard: {
     display: "grid",
     gridTemplateColumns: "1fr auto auto",
