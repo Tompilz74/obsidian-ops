@@ -60,8 +60,31 @@ type PartRow = {
   component_ids: string[];
 };
 
+type SeaHubInventoryRow = {
+  id: string;
+  title: string;
+  vessel_id: string;
+  department_id: string;
+  part_number: string;
+  make: string;
+  related_component_id: string;
+  supplier: string;
+  quantity: number;
+  quantity_units: string;
+  min_level: number;
+  location: string;
+  expiry_date: string;
+  critical_status: string;
+  cost: number;
+  currency: string;
+  comments: string;
+  image_name: string;
+  created_at: string;
+};
+
 const statuses = ["active", "spare", "out"] as const;
 const partsStorageKey = "obsidian-ops.parts.v1";
+const seahubInventoryStorageKey = "obsidian-ops.seahub-inventory.v1";
 
 function fileExt(name: string) {
   const parts = name.split(".");
@@ -101,6 +124,21 @@ function readStoredParts() {
 function writeStoredParts(parts: PartRow[]) {
   if (typeof window === "undefined") return;
   window.localStorage.setItem(partsStorageKey, JSON.stringify(parts));
+}
+
+function readStoredSeaHubInventory() {
+  if (typeof window === "undefined") return [];
+  try {
+    const raw = window.localStorage.getItem(seahubInventoryStorageKey);
+    return raw ? (JSON.parse(raw) as SeaHubInventoryRow[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeStoredSeaHubInventory(items: SeaHubInventoryRow[]) {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(seahubInventoryStorageKey, JSON.stringify(items));
 }
 
 function useMediaQuery(query: string) {
@@ -387,7 +425,7 @@ function ListRow({
 export default function Inventory() {
   const isMobile = useMediaQuery("(max-width: 980px)");
   const [mobileTab, setMobileTab] = useState<"list" | "editor">("list");
-  const [appMode, setAppMode] = useState<"equipment" | "parts">("equipment");
+  const [appMode, setAppMode] = useState<"equipment" | "parts" | "seahub">("equipment");
   const isMobileEditor = isMobile && mobileTab === "editor";
 
   const [vessels, setVessels] = useState<Option[]>([]);
@@ -421,6 +459,30 @@ export default function Inventory() {
     notes: "",
   };
   const [partForm, setPartForm] = useState({ ...emptyPartForm });
+
+  const emptySeaHubForm = {
+    id: "",
+    title: "",
+    vessel_id: "",
+    department_id: "",
+    part_number: "",
+    make: "",
+    related_component_id: "",
+    supplier: "",
+    quantity: "1",
+    quantity_units: "Units",
+    min_level: "",
+    location: "",
+    expiry_date: "",
+    critical_status: "",
+    cost: "",
+    currency: "AUD",
+    comments: "",
+    image_name: "",
+  };
+  const [seahubItems, setSeahubItems] = useState<SeaHubInventoryRow[]>(() => readStoredSeaHubInventory());
+  const [seahubForm, setSeahubForm] = useState({ ...emptySeaHubForm });
+  const [seahubQuery, setSeahubQuery] = useState("");
 
   const [loading, setLoading] = useState(false);
 
@@ -522,6 +584,34 @@ export default function Inventory() {
     [linkedParts]
   );
 
+  const seahubVisibleItems = useMemo(() => {
+    const query = seahubQuery.trim().toLowerCase();
+    return seahubItems
+      .filter((item) => {
+        if (!query) return true;
+        const vessel = vessels.find((v) => v.id === item.vessel_id)?.name ?? "";
+        const department = departments.find((d) => d.id === item.department_id)?.name ?? "";
+        const component = rows.find((r) => r.id === item.related_component_id)?.name ?? "";
+        return [item.title, item.part_number, item.make, item.supplier, item.location, item.comments, vessel, department, component]
+          .filter(Boolean)
+          .join(" ")
+          .toLowerCase()
+          .includes(query);
+      })
+      .sort((a, b) => b.created_at.localeCompare(a.created_at));
+  }, [seahubItems, seahubQuery, vessels, departments, rows]);
+  const seahubTotalValue = useMemo(
+    () => seahubItems.reduce((sum, item) => sum + (Number(item.quantity) || 0) * (Number(item.cost) || 0), 0),
+    [seahubItems]
+  );
+  const seahubLowStock = useMemo(
+    () => seahubItems.filter((item) => item.min_level > 0 && item.quantity <= item.min_level).length,
+    [seahubItems]
+  );
+
+  useEffect(() => {
+    writeStoredSeaHubInventory(seahubItems);
+  }, [seahubItems]);
   useEffect(() => {
     writeStoredParts(parts);
   }, [parts]);
@@ -902,6 +992,10 @@ export default function Inventory() {
     setPartForm({ ...emptyPartForm });
   }
 
+  function resetSeaHubForm() {
+    setSeahubForm({ ...emptySeaHubForm });
+  }
+
   function normaliseNumber(value: string) {
     const n = Number(value);
     return Number.isFinite(n) ? n : 0;
@@ -947,6 +1041,109 @@ export default function Inventory() {
     }
 
     resetPartForm();
+  }
+
+  function saveSeaHubItem() {
+    if (!seahubForm.title.trim()) {
+      showToast("error", "Title is required.", "Can’t save inventory");
+      return;
+    }
+    if (!seahubForm.part_number.trim()) {
+      showToast("error", "Part number is required.", "Can’t save inventory");
+      return;
+    }
+
+    const row: SeaHubInventoryRow = {
+      id: seahubForm.id || newLocalId("seahub"),
+      title: seahubForm.title.trim(),
+      vessel_id: seahubForm.vessel_id,
+      department_id: seahubForm.department_id,
+      part_number: seahubForm.part_number.trim(),
+      make: seahubForm.make.trim(),
+      related_component_id: seahubForm.related_component_id,
+      supplier: seahubForm.supplier.trim(),
+      quantity: normaliseNumber(seahubForm.quantity),
+      quantity_units: seahubForm.quantity_units.trim() || "Units",
+      min_level: normaliseNumber(seahubForm.min_level),
+      location: seahubForm.location.trim(),
+      expiry_date: seahubForm.expiry_date,
+      critical_status: seahubForm.critical_status,
+      cost: normaliseNumber(seahubForm.cost),
+      currency: seahubForm.currency.trim() || "AUD",
+      comments: seahubForm.comments.trim(),
+      image_name: seahubForm.image_name,
+      created_at: seahubItems.find((item) => item.id === seahubForm.id)?.created_at ?? new Date().toISOString(),
+    };
+
+    setSeahubItems((current) =>
+      seahubForm.id ? current.map((item) => (item.id === seahubForm.id ? row : item)) : [row, ...current]
+    );
+    resetSeaHubForm();
+    showToast("success", seahubForm.id ? "SeaHub inventory item updated." : "SeaHub inventory item staged.");
+  }
+
+  function editSeaHubItem(item: SeaHubInventoryRow) {
+    setSeahubForm({
+      id: item.id,
+      title: item.title,
+      vessel_id: item.vessel_id,
+      department_id: item.department_id,
+      part_number: item.part_number,
+      make: item.make,
+      related_component_id: item.related_component_id,
+      supplier: item.supplier,
+      quantity: String(item.quantity ?? 0),
+      quantity_units: item.quantity_units || "Units",
+      min_level: item.min_level ? String(item.min_level) : "",
+      location: item.location,
+      expiry_date: item.expiry_date,
+      critical_status: item.critical_status,
+      cost: item.cost ? String(item.cost) : "",
+      currency: item.currency || "AUD",
+      comments: item.comments,
+      image_name: item.image_name,
+    });
+    setAppMode("seahub");
+    if (isMobile) setMobileTab("list");
+  }
+
+  function deleteSeaHubItem(id: string) {
+    if (!confirm("Delete this staged SeaHub inventory item?")) return;
+    setSeahubItems((current) => current.filter((item) => item.id !== id));
+    if (seahubForm.id === id) resetSeaHubForm();
+  }
+
+  function exportSeaHubCsv() {
+    const headers = ["Title", "Vessel", "Department", "Part Number", "Make", "Related Component", "Supplier", "Quantity", "Quantity Units", "Minimum Level", "Location", "Expiry Date", "Critical Status", "Cost", "Currency", "Comments", "Image"];
+    const csvRows = seahubItems.map((item) => {
+      const values = [
+        item.title,
+        vessels.find((v) => v.id === item.vessel_id)?.name ?? "",
+        departments.find((d) => d.id === item.department_id)?.name ?? "",
+        item.part_number,
+        item.make,
+        rows.find((r) => r.id === item.related_component_id)?.name ?? "",
+        item.supplier,
+        String(item.quantity ?? 0),
+        item.quantity_units,
+        String(item.min_level ?? 0),
+        item.location,
+        item.expiry_date,
+        item.critical_status,
+        String(item.cost ?? 0),
+        item.currency,
+        item.comments,
+        item.image_name,
+      ];
+      return values.map((value) => `"${String(value).replace(/"/g, '""')}"`).join(",");
+    });
+    const blob = new Blob([[headers.join(","), ...csvRows].join("\n")], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `seahub-inventory-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
   }
 
   function editPart(part: PartRow) {
@@ -1005,6 +1202,11 @@ export default function Inventory() {
   function openPartsMode(part?: PartRow) {
     setAppMode("parts");
     if (part) editPart(part);
+    if (isMobile) setMobileTab("list");
+  }
+
+  function openSeaHubMode() {
+    setAppMode("seahub");
     if (isMobile) setMobileTab("list");
   }
   // ✅ Upload works even without a component id (draft mode)
@@ -1298,6 +1500,14 @@ export default function Inventory() {
             >
               Parts
             </button>
+            <button
+              type="button"
+              className="btn"
+              onClick={openSeaHubMode}
+              style={{ ...ui.modeTab, ...(appMode === "seahub" ? ui.modeTabActive : null) }}
+            >
+              SeaHub
+            </button>
           </div>
 
           {isMobile ? (
@@ -1444,7 +1654,7 @@ export default function Inventory() {
             </>
           )}
 
-          {isMobile && mobileTab === "list" ? (
+          {appMode === "equipment" && isMobile && mobileTab === "list" ? (
             <div style={ui.mobileFilters}>
               <div style={ui.searchWrapMobile}>
                 <input
@@ -1580,10 +1790,10 @@ export default function Inventory() {
             <span style={ui.commandValue}>{parts.length}</span>
             <span style={ui.commandLabel}>parts</span>
           </button>
-          <button type="button" className="btn" style={ui.commandTile} onClick={() => setSeahubFilter("unsynced")}>
-            <span style={ui.commandKicker}>Sync</span>
-            <span style={ui.commandValue}>{totalUnsynced}</span>
-            <span style={ui.commandLabel}>pending</span>
+          <button type="button" className="btn" style={ui.commandTile} onClick={openSeaHubMode}>
+            <span style={ui.commandKicker}>SeaHub</span>
+            <span style={ui.commandValue}>{seahubItems.length}</span>
+            <span style={ui.commandLabel}>inventory</span>
           </button>
         </div>
 
@@ -1688,7 +1898,146 @@ export default function Inventory() {
               </div>
             </div>
           ) : null}
-          {/* List */}
+          {appMode === "seahub" ? (
+            <div style={{ ...ui.card, gridColumn: "1 / -1" }}>
+              <div style={ui.seahubHero}>
+                <div>
+                  <div style={ui.overline}>SeaHub inventory staging</div>
+                  <div style={ui.partsHeroTitle}>New vessel stock intake</div>
+                  <div style={ui.partsHeroSub}>Capture SeaHub-style inventory rows quickly, then export the list when you are ready.</div>
+                </div>
+                <div style={isMobile ? { ...ui.partsHeroStats, gridTemplateColumns: "1fr" } : ui.partsHeroStats}>
+                  <div style={ui.metricTile}><div style={ui.metricValue}>{seahubItems.length}</div><div style={ui.metricLabel}>Items</div></div>
+                  <div style={ui.metricTile}><div style={ui.metricValue}>{seahubLowStock}</div><div style={ui.metricLabel}>Low stock</div></div>
+                  <div style={ui.metricTile}><div style={ui.metricValue}>AUD {seahubTotalValue.toFixed(0)}</div><div style={ui.metricLabel}>Value</div></div>
+                </div>
+              </div>
+
+              <div style={ui.cardPad}>
+                <Section title={seahubForm.id ? "Edit SeaHub Item" : "Add SeaHub Item"} right={<span style={ui.mutedSmall}>Saved on this device</span>}>
+                  <div style={isMobile ? ui.formGridMobile : ui.formGrid}>
+                    <Field label="Title" hint="Required">
+                      <input className="field" value={seahubForm.title} onChange={(e) => setSeahubForm((p) => ({ ...p, title: e.target.value }))} placeholder="e.g. Oil filter, fire extinguisher" style={ui.field} />
+                    </Field>
+                    <Field label="Part number" hint="Required">
+                      <input className="field" value={seahubForm.part_number} onChange={(e) => setSeahubForm((p) => ({ ...p, part_number: e.target.value }))} placeholder="SKU / OEM / serial if needed" style={ui.field} />
+                    </Field>
+                    <Field label="Vessel">
+                      <select className="field" value={seahubForm.vessel_id} onChange={(e) => setSeahubForm((p) => ({ ...p, vessel_id: e.target.value }))} style={ui.field}>
+                        <option value="">- All Vessels -</option>
+                        {vessels.map((v) => <option key={v.id} value={v.id}>{v.name}</option>)}
+                      </select>
+                    </Field>
+                    <Field label="Department">
+                      <select className="field" value={seahubForm.department_id} onChange={(e) => setSeahubForm((p) => ({ ...p, department_id: e.target.value }))} style={ui.field}>
+                        <option value="">- All Departments -</option>
+                        {departments.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
+                      </select>
+                    </Field>
+                    <Field label="Make">
+                      <input className="field" list="seahub-makes" value={seahubForm.make} onChange={(e) => setSeahubForm((p) => ({ ...p, make: e.target.value }))} placeholder="Maker / brand" style={ui.field} />
+                    </Field>
+                    <Field label="Related component">
+                      <select className="field" value={seahubForm.related_component_id} onChange={(e) => setSeahubForm((p) => ({ ...p, related_component_id: e.target.value }))} style={ui.field}>
+                        <option value="">- None -</option>
+                        {rows.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
+                      </select>
+                    </Field>
+                    <Field label="Supplier">
+                      <input className="field" list="seahub-suppliers" value={seahubForm.supplier} onChange={(e) => setSeahubForm((p) => ({ ...p, supplier: e.target.value }))} placeholder="Supplier" style={ui.field} />
+                    </Field>
+                    <Field label="Quantity / units">
+                      <div style={{ display: "grid", gridTemplateColumns: "0.7fr 1fr", gap: 8 }}>
+                        <input className="field" type="number" min="0" step="1" value={seahubForm.quantity} onChange={(e) => setSeahubForm((p) => ({ ...p, quantity: e.target.value }))} style={ui.field} />
+                        <select className="field" value={seahubForm.quantity_units} onChange={(e) => setSeahubForm((p) => ({ ...p, quantity_units: e.target.value }))} style={ui.field}>
+                          <option>Units</option>
+                          <option>Each</option>
+                          <option>Box</option>
+                          <option>Pair</option>
+                          <option>Litres</option>
+                          <option>Metres</option>
+                          <option>Kit</option>
+                        </select>
+                      </div>
+                    </Field>
+                    <Field label="Minimum level">
+                      <input className="field" type="number" min="0" step="1" value={seahubForm.min_level} onChange={(e) => setSeahubForm((p) => ({ ...p, min_level: e.target.value }))} placeholder="Alert level" style={ui.field} />
+                    </Field>
+                    <Field label="Location">
+                      <input className="field" value={seahubForm.location} onChange={(e) => setSeahubForm((p) => ({ ...p, location: e.target.value }))} placeholder="Locker / shelf / bin" style={ui.field} />
+                    </Field>
+                    <Field label="Expiry date">
+                      <input className="field" type="date" value={seahubForm.expiry_date} onChange={(e) => setSeahubForm((p) => ({ ...p, expiry_date: e.target.value }))} style={ui.field} />
+                    </Field>
+                    <Field label="Critical status">
+                      <select className="field" value={seahubForm.critical_status} onChange={(e) => setSeahubForm((p) => ({ ...p, critical_status: e.target.value }))} style={ui.field}>
+                        <option value="">- None -</option>
+                        <option value="Critical">Critical</option>
+                        <option value="Operational">Operational</option>
+                        <option value="Consumable">Consumable</option>
+                      </select>
+                    </Field>
+                    <Field label="Cost / currency">
+                      <div style={{ display: "grid", gridTemplateColumns: "1fr 82px", gap: 8 }}>
+                        <input className="field" type="number" min="0" step="0.01" value={seahubForm.cost} onChange={(e) => setSeahubForm((p) => ({ ...p, cost: e.target.value }))} placeholder="0.00" style={ui.field} />
+                        <input className="field" value={seahubForm.currency} onChange={(e) => setSeahubForm((p) => ({ ...p, currency: e.target.value.toUpperCase() }))} placeholder="AUD" style={ui.field} />
+                      </div>
+                    </Field>
+                    <Field label="Image / photo note">
+                      <input className="field" value={seahubForm.image_name} onChange={(e) => setSeahubForm((p) => ({ ...p, image_name: e.target.value }))} placeholder="Photo filename or note" style={ui.field} />
+                    </Field>
+                    <Field label="Comments" span={2}>
+                      <textarea className="field" value={seahubForm.comments} onChange={(e) => setSeahubForm((p) => ({ ...p, comments: e.target.value }))} placeholder="Condition, alternate numbers, anything to check later" style={{ ...ui.field, minHeight: 92, resize: "vertical", lineHeight: 1.45 }} />
+                    </Field>
+                  </div>
+                  <datalist id="seahub-makes">
+                    {Array.from(new Set(rows.map((r) => r.make).filter(Boolean) as string[])).map((make) => <option key={make} value={make} />)}
+                  </datalist>
+                  <datalist id="seahub-suppliers">
+                    {Array.from(new Set([...parts.map((p) => p.supplier), ...rows.map((r) => r.supplier)].filter(Boolean) as string[])).map((supplier) => <option key={supplier} value={supplier} />)}
+                  </datalist>
+                  <div style={ui.mobileActionBar}>
+                    {seahubForm.id ? <button type="button" className="btn" style={ui.btnGhost} onClick={resetSeaHubForm}>New item</button> : null}
+                    <button type="button" className="btn" style={ui.btnPrimary} onClick={saveSeaHubItem}>{seahubForm.id ? "Update item" : "Add inventory item"}</button>
+                  </div>
+                </Section>
+
+                <Section title="SeaHub Inventory List" right={<span style={ui.mutedSmall}>{seahubVisibleItems.length} shown</span>}>
+                  <div style={isMobile ? { ...ui.seahubListTools, gridTemplateColumns: "1fr" } : ui.seahubListTools}>
+                    <input className="field" value={seahubQuery} onChange={(e) => setSeahubQuery(e.target.value)} placeholder="Search title, part no., supplier, location" style={{ ...ui.field, width: "100%" }} />
+                    <button type="button" className="btn" style={ui.btnGhost} onClick={exportSeaHubCsv} disabled={!seahubItems.length}>Export CSV</button>
+                  </div>
+                  <div style={ui.partRows}>
+                    {seahubVisibleItems.map((item) => {
+                      const vessel = vessels.find((v) => v.id === item.vessel_id)?.name ?? "No vessel";
+                      const department = departments.find((d) => d.id === item.department_id)?.name ?? "No department";
+                      const component = rows.find((r) => r.id === item.related_component_id)?.name ?? "No component";
+                      const low = item.min_level > 0 && item.quantity <= item.min_level;
+                      return (
+                        <div key={item.id} style={isMobile ? { ...ui.seahubItemCard, gridTemplateColumns: "1fr" } : ui.seahubItemCard}>
+                          <div style={{ minWidth: 0 }}>
+                            <div style={ui.partNameLine}><span style={ui.partName}>{item.title}</span>{low ? <Pill tone="danger">Low</Pill> : null}{item.critical_status ? <Pill tone={item.critical_status === "Critical" ? "danger" : "muted"}>{item.critical_status}</Pill> : null}</div>
+                            <div style={ui.mutedSmall}>{[item.part_number, item.make || "No make", item.supplier || "No supplier"].join(" • ")}</div>
+                            <div style={ui.linkedNames}>{[vessel, department, component, item.location || "No location"].join(" • ")}</div>
+                          </div>
+                          <div style={isMobile ? { ...ui.partQtyBlock, textAlign: "left" } : ui.partQtyBlock}>
+                            <div style={ui.partQty}>{item.quantity} {item.quantity_units}</div>
+                            <div style={ui.mutedTiny}>min {item.min_level || 0}</div>
+                            <div style={ui.mutedTiny}>{item.currency || "AUD"} {(Number(item.cost) || 0).toFixed(2)}</div>
+                          </div>
+                          <div style={ui.partActions}>
+                            <button type="button" className="btn" style={ui.btnPrimary} onClick={() => editSeaHubItem(item)}>Edit</button>
+                            <button type="button" className="btn" style={ui.btnDanger} onClick={() => deleteSeaHubItem(item.id)}>Delete</button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                    {!seahubVisibleItems.length ? <div style={ui.photoEmpty}><div style={ui.emptyTitle}>No SeaHub inventory staged yet.</div><div style={ui.emptySub}>Add the first item above, then keep moving through the vessel.</div></div> : null}
+                  </div>
+                </Section>
+              </div>
+            </div>
+          ) : null}          {/* List */}
           {appMode === "equipment" && showList ? (
             <div style={ui.card}>
               <div style={ui.cardHeader}>
@@ -2456,6 +2805,10 @@ export default function Inventory() {
             <span style={ui.dockIcon}>PT</span>
             <span>Parts</span>
           </button>
+          <button type="button" className="btn" style={{ ...ui.dockBtn, ...(appMode === "seahub" ? ui.dockBtnActive : null) }} onClick={openSeaHubMode}>
+            <span style={ui.dockIcon}>SH</span>
+            <span>SeaHub</span>
+          </button>
           <button type="button" className="btn" style={ui.dockAction} onClick={startCaptureFirst}>
             Quick add
           </button>
@@ -2678,7 +3031,7 @@ const ui = {
   } as React.CSSProperties,
   modeTabsMobile: {
     display: "grid",
-    gridTemplateColumns: "1fr 1fr",
+    gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
     width: "100%",
     borderRadius: 16,
     border: "1px solid rgba(255,255,255,0.16)",
@@ -2703,6 +3056,28 @@ const ui = {
     boxShadow: "0 10px 22px rgba(0,0,0,0.18)",
   } as React.CSSProperties,
 
+  seahubHero: {
+    padding: 18,
+    display: "grid",
+    gridTemplateColumns: "1fr auto",
+    gap: 16,
+    alignItems: "center",
+    borderBottom: "1px solid rgba(2,6,23,0.08)",
+    background:
+      "linear-gradient(135deg, rgba(7,19,31,0.94) 0%, rgba(21,94,117,0.82) 48%, rgba(245,158,11,0.32) 100%)",
+    color: "#fff",
+  } as React.CSSProperties,
+  seahubListTools: { display: "grid", gridTemplateColumns: "1fr auto", gap: 10, marginBottom: 12 } as React.CSSProperties,
+  seahubItemCard: {
+    display: "grid",
+    gridTemplateColumns: "1fr auto auto",
+    gap: 12,
+    alignItems: "center",
+    borderRadius: 16,
+    border: "1px solid rgba(2,6,23,0.08)",
+    background: "linear-gradient(180deg, rgba(255,255,255,0.94) 0%, rgba(255,251,235,0.54) 100%)",
+    padding: 14,
+  } as React.CSSProperties,
   partsHero: {
     padding: 18,
     display: "grid",
@@ -2782,7 +3157,7 @@ const ui = {
     bottom: "calc(10px + env(safe-area-inset-bottom))",
     zIndex: 60,
     display: "grid",
-    gridTemplateColumns: "1fr 1fr 1.15fr",
+    gridTemplateColumns: "1fr 1fr 1fr 1.1fr",
     gap: 8,
     padding: 8,
     borderRadius: 20,
