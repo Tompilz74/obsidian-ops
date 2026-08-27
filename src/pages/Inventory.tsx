@@ -1141,16 +1141,12 @@ export default function Inventory() {
       showToast("error", "Title is required.", "Can’t save inventory");
       return;
     }
-    if (!seahubForm.part_number.trim()) {
-      showToast("error", "Part number is required.", "Can’t save inventory");
-      return;
-    }
 
     const payload = {
       title: seahubForm.title.trim(),
       vessel_id: seahubForm.vessel_id || null,
       department_id: seahubForm.department_id || null,
-      part_number: seahubForm.part_number.trim(),
+      part_number: seahubForm.part_number.trim() || "",
       make: seahubForm.make.trim() || null,
       related_component_id: seahubForm.related_component_id || null,
       supplier: seahubForm.supplier.trim() || null,
@@ -1167,6 +1163,9 @@ export default function Inventory() {
       updated_at: new Date().toISOString(),
     };
 
+    const pendingPhotos = [...seahubPendingPhotos];
+    const isUpdate = Boolean(seahubForm.id);
+
     setLoading(true);
     try {
       const res = seahubForm.id
@@ -1175,8 +1174,8 @@ export default function Inventory() {
       if (res.error) throw res.error;
 
       const itemId = res.data.id as string;
-      for (let i = 0; i < seahubPendingPhotos.length; i++) {
-        const photo = seahubPendingPhotos[i];
+      for (let i = 0; i < pendingPhotos.length; i++) {
+        const photo = pendingPhotos[i];
         const storagePath = makeSeaHubStoragePath(itemId, photo.fileName, i);
         const up = await supabase.storage.from("component-photos").upload(storagePath, photo.file, { upsert: false });
         if (up.error) throw up.error;
@@ -1190,8 +1189,12 @@ export default function Inventory() {
       }
 
       resetSeaHubForm();
-      await loadSeaHubInventory();
-      showToast("success", seahubForm.id ? "SeaHub inventory item updated online." : "SeaHub inventory item saved online.");
+      showToast("success", isUpdate ? "SeaHub inventory item updated online." : "Saved. Ready for the next item.");
+      try {
+        await loadSeaHubInventory();
+      } catch (reloadError: any) {
+        showToast("error", reloadError.message ?? "Saved, but list refresh failed", "Refresh failed");
+      }
     } catch (e: any) {
       showToast("error", e.message ?? "SeaHub inventory save failed", "Error");
     } finally {
@@ -2047,7 +2050,7 @@ export default function Inventory() {
               </div>
 
               <div style={ui.cardPad}>
-                <Section title={seahubForm.id ? "Edit SeaHub Item" : "Add SeaHub Item"} right={<span style={ui.mutedSmall}>Saved on this device</span>}>
+                <Section title={seahubForm.id ? "Edit SeaHub Item" : "Add SeaHub Item"} right={<span style={ui.mutedSmall}>Saves online</span>}>
                   <input
                     ref={seahubFileInputRef}
                     type="file"
@@ -2065,7 +2068,7 @@ export default function Inventory() {
                     <Field label="Title" hint="Required">
                       <input className="field" value={seahubForm.title} onChange={(e) => setSeahubForm((p) => ({ ...p, title: e.target.value }))} placeholder="e.g. Oil filter, fire extinguisher" style={ui.field} />
                     </Field>
-                    <Field label="Part number" hint="Required">
+                    <Field label="Part number" hint="Optional">
                       <input className="field" value={seahubForm.part_number} onChange={(e) => setSeahubForm((p) => ({ ...p, part_number: e.target.value }))} placeholder="SKU / OEM / serial if needed" style={ui.field} />
                     </Field>
                     <Field label="Vessel">
