@@ -100,6 +100,8 @@ type SeaHubInventoryRow = {
 
 const statuses = ["active", "spare", "out"] as const;
 const partsStorageKey = "obsidian-ops.parts.v1";
+const seahubInventoryStorageKey = "obsidian-ops.seahub-inventory.v1";
+const seahubInventoryImportedKey = "obsidian-ops.seahub-inventory.imported.v1";
 
 function fileExt(name: string) {
   const parts = name.split(".");
@@ -144,6 +146,36 @@ function readStoredParts() {
 function writeStoredParts(parts: PartRow[]) {
   if (typeof window === "undefined") return;
   window.localStorage.setItem(partsStorageKey, JSON.stringify(parts));
+}
+
+type LegacySeaHubInventoryRow = Partial<SeaHubInventoryRow> & {
+  image_urls?: string[];
+};
+
+function readLegacySeaHubInventory() {
+  if (typeof window === "undefined") return [] as LegacySeaHubInventoryRow[];
+  if (window.localStorage.getItem(seahubInventoryImportedKey) === "done") return [];
+  try {
+    const raw = window.localStorage.getItem(seahubInventoryStorageKey);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? (parsed as LegacySeaHubInventoryRow[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+function markLegacySeaHubInventoryImported() {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(seahubInventoryImportedKey, "done");
+  window.localStorage.removeItem(seahubInventoryStorageKey);
+}
+
+async function dataUrlToFile(dataUrl: string, fallbackName: string) {
+  const response = await fetch(dataUrl);
+  const blob = await response.blob();
+  const mimeExt = blob.type.split("/")[1]?.split(";")[0] || "jpg";
+  const ext = fallbackName.includes(".") ? fileExt(fallbackName) : mimeExt;
+  return new File([blob], fallbackName.includes(".") ? fallbackName : `${fallbackName}.${ext}`, { type: blob.type || "image/jpeg" });
 }
 
 
@@ -762,6 +794,60 @@ export default function Inventory() {
     }
 
     setSeahubItems(items);
+  }
+
+  async function syncLegacySeaHubInventory() {
+    const legacyItems = readLegacySeaHubInventory().filter((item) => String(item.title ?? "").trim());
+    if (!legacyItems.length) return;
+
+    let imported = 0;
+    for (const item of legacyItems) {
+      const payload: Record<string, unknown> = {
+        title: String(item.title ?? "").trim(),
+        vessel_id: item.vessel_id || null,
+        department_id: item.department_id || null,
+        part_number: String(item.part_number ?? "").trim(),
+        make: item.make || null,
+        related_component_id: item.related_component_id || null,
+        supplier: item.supplier || null,
+        quantity: normaliseNumber(String(item.quantity ?? 1)),
+        quantity_units: String(item.quantity_units ?? "Units").trim() || "Units",
+        min_level: normaliseNumber(String(item.min_level ?? 0)),
+        location: item.location || null,
+        expiry_date: item.expiry_date || null,
+        critical_status: item.critical_status || null,
+        cost: normaliseNumber(String(item.cost ?? 0)),
+        currency: String(item.currency ?? "AUD").trim() || "AUD",
+        comments: item.comments || null,
+        image_name: item.image_name || null,
+        created_at: item.created_at || new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      };
+
+      const res = await supabase.from("seahub_inventory_items").insert(payload).select("id").single();
+      if (res.error) throw res.error;
+
+      const itemId = res.data.id as string;
+      const imageUrls = (item.image_urls ?? []).filter((url) => typeof url === "string" && url.startsWith("data:"));
+      for (let i = 0; i < imageUrls.length; i++) {
+        const photoFile = await dataUrlToFile(imageUrls[i], `legacy-seahub-${itemId}-${i + 1}.jpg`);
+        const storagePath = makeSeaHubStoragePath(itemId, photoFile.name, i);
+        const up = await supabase.storage.from("component-photos").upload(storagePath, photoFile, { upsert: false });
+        if (up.error) throw up.error;
+
+        const photoRes = await supabase
+          .from("seahub_inventory_photos")
+          .insert({ item_id: itemId, storage_path: storagePath, caption: null, sort_order: i })
+          .select("id")
+          .single();
+        if (photoRes.error) throw photoRes.error;
+      }
+      imported++;
+    }
+
+    markLegacySeaHubInventoryImported();
+    await loadSeaHubInventory();
+    showToast("success", `Recovered ${imported} old SeaHub item${imported === 1 ? "" : "s"} online.`);
   }
   function resetDraft() {
     draftIdRef.current =
@@ -1462,6 +1548,7 @@ export default function Inventory() {
         await loadLookups();
         await loadComponents();
         await loadSeaHubInventory();
+        await syncLegacySeaHubInventory();
       } catch (e: any) {
         showToast("error", e.message ?? "Load failed", "Error");
       }
@@ -3872,3 +3959,5 @@ const css = `
     input, select, textarea { font-size: 16px !important; }
   }
 `;
+
+
