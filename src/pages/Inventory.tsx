@@ -644,6 +644,7 @@ export default function Inventory() {
 
   async function loadLookups() {
     await ensureVesselExists("Flying Fish");
+    await ensureVesselExists("Gambler");
 
     const [v, s, d] = await Promise.all([
       supabase.from("vessels").select("id,name").order("name"),
