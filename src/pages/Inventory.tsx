@@ -46,6 +46,12 @@ type PendingPhoto = {
   previewUrl: string; // local object URL
 };
 
+type SeaHubPendingPhoto = {
+  file: File;
+  fileName: string;
+  previewUrl: string;
+};
+
 type PartRow = {
   id: string;
   name: string;
@@ -60,32 +66,40 @@ type PartRow = {
   component_ids: string[];
 };
 
+type SeaHubInventoryPhotoRow = {
+  id: string;
+  item_id: string;
+  storage_path: string;
+  caption: string | null;
+  sort_order: number;
+  url?: string;
+};
+
 type SeaHubInventoryRow = {
   id: string;
   title: string;
-  vessel_id: string;
-  department_id: string;
+  vessel_id: string | null;
+  department_id: string | null;
   part_number: string;
-  make: string;
-  related_component_id: string;
-  supplier: string;
+  make: string | null;
+  related_component_id: string | null;
+  supplier: string | null;
   quantity: number;
   quantity_units: string;
   min_level: number;
-  location: string;
-  expiry_date: string;
-  critical_status: string;
+  location: string | null;
+  expiry_date: string | null;
+  critical_status: string | null;
   cost: number;
   currency: string;
-  comments: string;
-  image_name: string;
-  image_urls: string[];
+  comments: string | null;
+  image_name: string | null;
   created_at: string;
+  photos?: SeaHubInventoryPhotoRow[];
 };
 
 const statuses = ["active", "spare", "out"] as const;
 const partsStorageKey = "obsidian-ops.parts.v1";
-const seahubInventoryStorageKey = "obsidian-ops.seahub-inventory.v1";
 
 function fileExt(name: string) {
   const parts = name.split(".");
@@ -104,6 +118,11 @@ function makeDraftPath(draftId: string, originalName: string) {
   return `drafts/${draftId}/${stamp}.${ext}`;
 }
 
+function makeSeaHubStoragePath(itemId: string, originalName: string, index = 0) {
+  const ext = fileExt(originalName);
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  return `seahub-inventory/${itemId}/${stamp}-${index}.${ext}`;
+}
 function truncate(str: string, n: number) {
   return str.length > n ? str.slice(0, n - 1) + "…" : str;
 }
@@ -127,20 +146,6 @@ function writeStoredParts(parts: PartRow[]) {
   window.localStorage.setItem(partsStorageKey, JSON.stringify(parts));
 }
 
-function readStoredSeaHubInventory() {
-  if (typeof window === "undefined") return [];
-  try {
-    const raw = window.localStorage.getItem(seahubInventoryStorageKey);
-    return raw ? (JSON.parse(raw) as SeaHubInventoryRow[]) : [];
-  } catch {
-    return [];
-  }
-}
-
-function writeStoredSeaHubInventory(items: SeaHubInventoryRow[]) {
-  if (typeof window === "undefined") return;
-  window.localStorage.setItem(seahubInventoryStorageKey, JSON.stringify(items));
-}
 
 function useMediaQuery(query: string) {
   const [matches, setMatches] = useState(() => {
@@ -480,11 +485,11 @@ export default function Inventory() {
     currency: "AUD",
     comments: "",
     image_name: "",
-    image_urls: [] as string[],
   };
-  const [seahubItems, setSeahubItems] = useState<SeaHubInventoryRow[]>(() => readStoredSeaHubInventory());
+  const [seahubItems, setSeahubItems] = useState<SeaHubInventoryRow[]>([]);
   const [seahubForm, setSeahubForm] = useState({ ...emptySeaHubForm });
   const [seahubQuery, setSeahubQuery] = useState("");
+  const [seahubPendingPhotos, setSeahubPendingPhotos] = useState<SeaHubPendingPhoto[]>([]);
 
   const [loading, setLoading] = useState(false);
 
@@ -613,9 +618,6 @@ export default function Inventory() {
   );
 
   useEffect(() => {
-    writeStoredSeaHubInventory(seahubItems);
-  }, [seahubItems]);
-  useEffect(() => {
     writeStoredParts(parts);
   }, [parts]);
 
@@ -715,6 +717,52 @@ export default function Inventory() {
     setPhotos((res.data as PhotoRow[]) ?? []);
   }
 
+  async function loadSeaHubInventory() {
+    const res = await supabase
+      .from("seahub_inventory_items")
+      .select(
+        `
+        id,
+        title,
+        vessel_id,
+        department_id,
+        part_number,
+        make,
+        related_component_id,
+        supplier,
+        quantity,
+        quantity_units,
+        min_level,
+        location,
+        expiry_date,
+        critical_status,
+        cost,
+        currency,
+        comments,
+        image_name,
+        created_at,
+        photos:seahub_inventory_photos(id,item_id,storage_path,caption,sort_order)
+      `
+      )
+      .order("created_at", { ascending: false });
+
+    if (res.error) throw res.error;
+
+    const items = ((res.data as SeaHubInventoryRow[]) ?? []).map((item) => ({
+      ...item,
+      photos: [...(item.photos ?? [])].sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0)),
+    }));
+
+    for (const item of items) {
+      for (const photo of item.photos ?? []) {
+        try {
+          photo.url = await getSignedUrl(photo.storage_path);
+        } catch {}
+      }
+    }
+
+    setSeahubItems(items);
+  }
   function resetDraft() {
     draftIdRef.current =
       typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : String(Date.now());
@@ -996,8 +1044,18 @@ export default function Inventory() {
     setPartForm({ ...emptyPartForm });
   }
 
+  function clearSeaHubPendingPhotos() {
+    seahubPendingPhotos.forEach((p) => {
+      try {
+        URL.revokeObjectURL(p.previewUrl);
+      } catch {}
+    });
+    setSeahubPendingPhotos([]);
+  }
+
   function resetSeaHubForm() {
     setSeahubForm({ ...emptySeaHubForm });
+    clearSeaHubPendingPhotos();
   }
 
   function openSeaHubPhotoPicker(fromLibrary = false) {
@@ -1008,33 +1066,27 @@ export default function Inventory() {
     input.click();
   }
 
-  async function addSeaHubPhotos(files: File[]) {
-    const reads = files.map(
-      (file) =>
-        new Promise<string>((resolve, reject) => {
-          const reader = new FileReader();
-          reader.onload = () => resolve(String(reader.result ?? ""));
-          reader.onerror = () => reject(reader.error);
-          reader.readAsDataURL(file);
-        })
-    );
-
-    try {
-      const urls = (await Promise.all(reads)).filter(Boolean);
-      if (!urls.length) return;
-      setSeahubForm((p) => ({
-        ...p,
-        image_urls: [...(p.image_urls ?? []), ...urls],
-        image_name: p.image_name || `${urls.length} photo${urls.length === 1 ? "" : "s"}`,
-      }));
-      showToast("success", `${urls.length} photo${urls.length === 1 ? "" : "s"} added to SeaHub item.`);
-    } catch (e: any) {
-      showToast("error", e?.message ?? "Couldn’t read photo", "Photo error");
-    }
+  function addSeaHubPhotos(files: File[]) {
+    const next = files.map((file) => ({ file, fileName: file.name, previewUrl: URL.createObjectURL(file) }));
+    if (!next.length) return;
+    setSeahubPendingPhotos((current) => [...current, ...next]);
+    setSeahubForm((p) => ({
+      ...p,
+      image_name: p.image_name || `${next.length} photo${next.length === 1 ? "" : "s"}`,
+    }));
+    showToast("success", `${next.length} photo${next.length === 1 ? "" : "s"} ready to upload.`);
   }
 
   function removeSeaHubPhoto(index: number) {
-    setSeahubForm((p) => ({ ...p, image_urls: (p.image_urls ?? []).filter((_, i) => i !== index) }));
+    setSeahubPendingPhotos((current) => {
+      const target = current[index];
+      if (target) {
+        try {
+          URL.revokeObjectURL(target.previewUrl);
+        } catch {}
+      }
+      return current.filter((_, i) => i !== index);
+    });
   }
 
   function normaliseNumber(value: string) {
@@ -1084,7 +1136,7 @@ export default function Inventory() {
     resetPartForm();
   }
 
-  function saveSeaHubItem() {
+  async function saveSeaHubItem() {
     if (!seahubForm.title.trim()) {
       showToast("error", "Title is required.", "Can’t save inventory");
       return;
@@ -1094,66 +1146,102 @@ export default function Inventory() {
       return;
     }
 
-    const row: SeaHubInventoryRow = {
-      id: seahubForm.id || newLocalId("seahub"),
+    const payload = {
       title: seahubForm.title.trim(),
-      vessel_id: seahubForm.vessel_id,
-      department_id: seahubForm.department_id,
+      vessel_id: seahubForm.vessel_id || null,
+      department_id: seahubForm.department_id || null,
       part_number: seahubForm.part_number.trim(),
-      make: seahubForm.make.trim(),
-      related_component_id: seahubForm.related_component_id,
-      supplier: seahubForm.supplier.trim(),
+      make: seahubForm.make.trim() || null,
+      related_component_id: seahubForm.related_component_id || null,
+      supplier: seahubForm.supplier.trim() || null,
       quantity: normaliseNumber(seahubForm.quantity),
       quantity_units: seahubForm.quantity_units.trim() || "Units",
       min_level: normaliseNumber(seahubForm.min_level),
-      location: seahubForm.location.trim(),
-      expiry_date: seahubForm.expiry_date,
-      critical_status: seahubForm.critical_status,
+      location: seahubForm.location.trim() || null,
+      expiry_date: seahubForm.expiry_date || null,
+      critical_status: seahubForm.critical_status || null,
       cost: normaliseNumber(seahubForm.cost),
       currency: seahubForm.currency.trim() || "AUD",
-      comments: seahubForm.comments.trim(),
-      image_name: seahubForm.image_name,
-      image_urls: seahubForm.image_urls ?? [],
-      created_at: seahubItems.find((item) => item.id === seahubForm.id)?.created_at ?? new Date().toISOString(),
+      comments: seahubForm.comments.trim() || null,
+      image_name: seahubForm.image_name.trim() || null,
+      updated_at: new Date().toISOString(),
     };
 
-    setSeahubItems((current) =>
-      seahubForm.id ? current.map((item) => (item.id === seahubForm.id ? row : item)) : [row, ...current]
-    );
-    resetSeaHubForm();
-    showToast("success", seahubForm.id ? "SeaHub inventory item updated." : "SeaHub inventory item staged.");
+    setLoading(true);
+    try {
+      const res = seahubForm.id
+        ? await supabase.from("seahub_inventory_items").update(payload).eq("id", seahubForm.id).select("id").single()
+        : await supabase.from("seahub_inventory_items").insert(payload).select("id").single();
+      if (res.error) throw res.error;
+
+      const itemId = res.data.id as string;
+      for (let i = 0; i < seahubPendingPhotos.length; i++) {
+        const photo = seahubPendingPhotos[i];
+        const storagePath = makeSeaHubStoragePath(itemId, photo.fileName, i);
+        const up = await supabase.storage.from("component-photos").upload(storagePath, photo.file, { upsert: false });
+        if (up.error) throw up.error;
+
+        const ins = await supabase
+          .from("seahub_inventory_photos")
+          .insert({ item_id: itemId, storage_path: storagePath, caption: null, sort_order: i })
+          .select("id")
+          .single();
+        if (ins.error) throw ins.error;
+      }
+
+      resetSeaHubForm();
+      await loadSeaHubInventory();
+      showToast("success", seahubForm.id ? "SeaHub inventory item updated online." : "SeaHub inventory item saved online.");
+    } catch (e: any) {
+      showToast("error", e.message ?? "SeaHub inventory save failed", "Error");
+    } finally {
+      setLoading(false);
+    }
   }
 
   function editSeaHubItem(item: SeaHubInventoryRow) {
     setSeahubForm({
       id: item.id,
       title: item.title,
-      vessel_id: item.vessel_id,
-      department_id: item.department_id,
+      vessel_id: item.vessel_id ?? "",
+      department_id: item.department_id ?? "",
       part_number: item.part_number,
-      make: item.make,
-      related_component_id: item.related_component_id,
-      supplier: item.supplier,
+      make: item.make ?? "",
+      related_component_id: item.related_component_id ?? "",
+      supplier: item.supplier ?? "",
       quantity: String(item.quantity ?? 0),
       quantity_units: item.quantity_units || "Units",
       min_level: item.min_level ? String(item.min_level) : "",
-      location: item.location,
-      expiry_date: item.expiry_date,
-      critical_status: item.critical_status,
+      location: item.location ?? "",
+      expiry_date: item.expiry_date ?? "",
+      critical_status: item.critical_status ?? "",
       cost: item.cost ? String(item.cost) : "",
       currency: item.currency || "AUD",
-      comments: item.comments,
-      image_name: item.image_name,
-      image_urls: item.image_urls ?? [],
+      comments: item.comments ?? "",
+      image_name: item.image_name ?? "",
     });
+    clearSeaHubPendingPhotos();
     setAppMode("seahub");
     if (isMobile) setMobileTab("list");
   }
 
-  function deleteSeaHubItem(id: string) {
-    if (!confirm("Delete this staged SeaHub inventory item?")) return;
-    setSeahubItems((current) => current.filter((item) => item.id !== id));
-    if (seahubForm.id === id) resetSeaHubForm();
+  async function deleteSeaHubItem(id: string) {
+    if (!confirm("Delete this SeaHub inventory item online?")) return;
+    const item = seahubItems.find((r) => r.id === id);
+    setLoading(true);
+    try {
+      const paths = (item?.photos ?? []).map((p) => p.storage_path);
+      if (paths.length) await supabase.storage.from("component-photos").remove(paths);
+      const res = await supabase.from("seahub_inventory_items").delete().eq("id", id);
+      if (res.error) throw res.error;
+      if (seahubForm.id === id) resetSeaHubForm();
+      await loadSeaHubInventory();
+      showToast("success", "SeaHub inventory item deleted.");
+    } catch (e: any) {
+      showToast("error", e.message ?? "Delete failed", "Error");
+    } finally {
+      setLoading(false);
+    }
   }
 
   function exportSeaHubCsv() {
@@ -1249,6 +1337,7 @@ export default function Inventory() {
   }
 
   function openSeaHubMode() {
+    clearSeaHubPendingPhotos();
     setAppMode("seahub");
     if (isMobile) setMobileTab("list");
   }
@@ -1369,6 +1458,7 @@ export default function Inventory() {
       try {
         await loadLookups();
         await loadComponents();
+        await loadSeaHubInventory();
       } catch (e: any) {
         showToast("error", e.message ?? "Load failed", "Error");
       }
@@ -2039,7 +2129,7 @@ export default function Inventory() {
                         <input className="field" value={seahubForm.currency} onChange={(e) => setSeahubForm((p) => ({ ...p, currency: e.target.value.toUpperCase() }))} placeholder="AUD" style={ui.field} />
                       </div>
                     </Field>
-                    <Field label="Photos" hint={`${seahubForm.image_urls.length} attached`} span={2}>
+                    <Field label="Photos" hint={`${seahubPendingPhotos.length} ready`} span={2}>
                       <div style={ui.seahubPhotoBox}>
                         <div style={ui.seahubPhotoActions}>
                           <button type="button" className="btn" style={ui.btnPrimary} onClick={() => openSeaHubPhotoPicker(false)}>
@@ -2050,11 +2140,11 @@ export default function Inventory() {
                           </button>
                           <input className="field" value={seahubForm.image_name} onChange={(e) => setSeahubForm((p) => ({ ...p, image_name: e.target.value }))} placeholder="Photo note / label" style={{ ...ui.field, flex: 1, minWidth: 180 }} />
                         </div>
-                        {seahubForm.image_urls.length ? (
+                        {seahubPendingPhotos.length ? (
                           <div style={ui.seahubPhotoGrid}>
-                            {seahubForm.image_urls.map((url, index) => (
-                              <div key={`${url.slice(0, 32)}-${index}`} style={ui.seahubPhotoThumb}>
-                                <img src={url} alt={`SeaHub inventory ${index + 1}`} style={ui.quickThumbImg} />
+                            {seahubPendingPhotos.map((photo, index) => (
+                              <div key={`${photo.fileName}-${index}`} style={ui.seahubPhotoThumb}>
+                                <img src={photo.previewUrl} alt={`SeaHub inventory ${index + 1}`} style={ui.quickThumbImg} />
                                 <button type="button" className="btn" style={ui.seahubPhotoRemove} onClick={() => removeSeaHubPhoto(index)} aria-label="Remove photo">
                                   x
                                 </button>
@@ -2078,7 +2168,7 @@ export default function Inventory() {
                   </datalist>
                   <div style={ui.mobileActionBar}>
                     {seahubForm.id ? <button type="button" className="btn" style={ui.btnGhost} onClick={resetSeaHubForm}>New item</button> : null}
-                    <button type="button" className="btn" style={ui.btnPrimary} onClick={saveSeaHubItem}>{seahubForm.id ? "Update item" : "Add inventory item"}</button>
+                    <button type="button" className="btn" style={ui.btnPrimary} onClick={() => void saveSeaHubItem()} disabled={loading}>{seahubForm.id ? "Update item" : "Add inventory item"}</button>
                   </div>
                 </Section>
 
@@ -2093,14 +2183,14 @@ export default function Inventory() {
                       const department = departments.find((d) => d.id === item.department_id)?.name ?? "No department";
                       const component = rows.find((r) => r.id === item.related_component_id)?.name ?? "No component";
                       const low = item.min_level > 0 && item.quantity <= item.min_level;
-                      const itemPhotos = item.image_urls ?? [];
+                      const itemPhotos = item.photos ?? [];
                       return (
                         <div key={item.id} style={isMobile ? { ...ui.seahubItemCard, gridTemplateColumns: "1fr" } : ui.seahubItemCard}>
                           <div style={{ minWidth: 0 }}>
                             {itemPhotos.length ? (
                               <div style={ui.seahubListPhotos}>
-                                {itemPhotos.slice(0, 4).map((url, index) => (
-                                  <img key={`${item.id}-${index}`} src={url} alt={`${item.title} ${index + 1}`} style={ui.seahubListThumb} />
+                                {itemPhotos.slice(0, 4).map((photo, index) => (
+                                  photo.url ? <img key={`${item.id}-${index}`} src={photo.url} alt={`${item.title} ${index + 1}`} style={ui.seahubListThumb} /> : null
                                 ))}
                                 {itemPhotos.length > 4 ? <div style={ui.seahubPhotoMore}>+{itemPhotos.length - 4}</div> : null}
                               </div>
@@ -2116,7 +2206,7 @@ export default function Inventory() {
                           </div>
                           <div style={ui.partActions}>
                             <button type="button" className="btn" style={ui.btnPrimary} onClick={() => editSeaHubItem(item)}>Edit</button>
-                            <button type="button" className="btn" style={ui.btnDanger} onClick={() => deleteSeaHubItem(item.id)}>Delete</button>
+                            <button type="button" className="btn" style={ui.btnDanger} onClick={() => void deleteSeaHubItem(item.id)}>Delete</button>
                           </div>
                         </div>
                       );
